@@ -28,9 +28,32 @@
     position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
     z-index: 10; font-size: 0.8rem; color: #888;
   }
+  #controls {
+    position: fixed; top: 12px; left: 12px; z-index: 10;
+    font-size: 0.8rem; color: #ccc;
+    background: rgba(10,10,26,0.8); padding: 8px 12px; border-radius: 6px;
+    border: 1px solid #333; backdrop-filter: blur(8px); display: none;
+  }
+  #controls select {
+    background: #111; color: #fff; border: 1px solid #444; border-radius: 3px;
+    padding: 2px 6px; font-size: 0.8rem; margin-left: 4px;
+  }
 </style>
 </head>
 <body>
+
+<div id="controls">
+  <span style="color:#888;">Parallax</span>
+  <select id="parallax-select">
+    <option value="on">On</option>
+    <option value="off">Off</option>
+  </select>
+  <span style="color:#888; margin-left:8px;">Hands</span>
+  <select id="num-hands-select">
+    <option value="1">1</option>
+    <option value="2">2</option>
+  </select>
+</div>
 
 <div id="status">Click Start to enable camera</div>
 <button id="start-btn">Start Camera</button>
@@ -41,6 +64,8 @@
   <div><span class="label">Gesture: </span><span id="gesture-state" class="val">--</span></div>
   <div><span class="label">FPS: </span><span id="fps" class="val">--</span></div>
 </div>
+
+<div id="winner" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:20; font-size:4rem; font-weight:700; color:#fff; font-family:system-ui,sans-serif;">Winner!</div>
 
 <video id="webcam" autoplay playsinline style="display:none;"></video>
 
@@ -84,46 +109,127 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 document.body.appendChild(renderer.domElement);
 
 // Lighting
-const ambient = new THREE.AmbientLight(0x334466, 0.8);
+const ambient = new THREE.AmbientLight(0x667799, 1.2);
 scene.add(ambient);
+const frontLight = new THREE.DirectionalLight(0xffffff, 1.0);
+frontLight.position.set(0, 2, 8); // from camera side
+scene.add(frontLight);
 const pointLight = new THREE.PointLight(0xff6d00, 2, 50);
 pointLight.position.set(0, 3, -4);
+scene.add(pointLight);
 const fillLight = new THREE.DirectionalLight(0x4488cc, 0.6);
 fillLight.position.set(-5, 2, 2);
-scene.add(pointLight);
 scene.add(fillLight);
 
 // Grid of cubes as the 3D environment
 const cubes = [];
-const geometry = new THREE.BoxGeometry(0.6, 0.6, 0.6);
-for (let x = -4; x <= 4; x += 2) {
-  for (let y = -3; y <= 3; y += 2) {
-    for (let z = -10; z <= -2; z += 2) {
-      const hue = (x + 4) / 8;
-      const color = new THREE.Color().setHSL(hue, 0.6, 0.4);
-      const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3 });
-      const cube = new THREE.Mesh(geometry, mat);
-      cube.position.set(x, y, z);
-      cube.userData.basePos = cube.position.clone();
-      scene.add(cube);
-      cubes.push(cube);
+const cubeGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
+
+function spawnCubes() {
+  for (let x = -4; x <= 4; x += 2) {
+    for (let y = -1; y <= 3; y += 2) {
+      for (let z = -15; z <= -5; z += 2.5) {
+        const hue = (x + 4) / 8;
+        const color = new THREE.Color().setHSL(hue, 0.6, 0.4);
+        const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3 });
+        const cube = new THREE.Mesh(cubeGeo, mat);
+        cube.position.set(x, y, z);
+        scene.add(cube);
+        cubes.push(cube);
+      }
     }
   }
 }
+spawnCubes();
 
 // Projectile pool
 const projectiles = [];
+const GRAVITY_Y = -4;
 
-function fireProjectile(dir) {
+function fireProjectile(origin, vx, vy) {
   const geo = new THREE.SphereGeometry(0.15, 8, 8);
   const mat = new THREE.MeshStandardMaterial({ color: 0xff6d00, emissive: 0xff3d00, emissiveIntensity: 2 });
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.copy(camera.position);
+  mesh.position.copy(origin);
   scene.add(mesh);
   projectiles.push({
-    mesh, dir: dir.clone().normalize(),
-    speed: 30, life: 3.0
+    mesh, vx, vy, vz: -20,
+    life: 4.0
   });
+}
+
+// --- Hand Skeleton Visualization (2 hands) ---
+const JOINT_COUNT = 21;
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],       // thumb
+  [0,5],[5,6],[6,7],[7,8],       // index
+  [0,9],[9,10],[10,11],[11,12],  // middle
+  [0,13],[13,14],[14,15],[15,16],// ring
+  [0,17],[17,18],[18,19],[19,20],// pinky
+  [5,9],[9,13],[13,17],          // palm
+];
+
+const HAND_COLORS = [0x4fc3f7, 0xff6dff]; // cyan, magenta
+const handSkeletons = [];
+for (let h = 0; h < 2; h++) {
+  const group = new THREE.Group();
+  scene.add(group);
+  const jointGeo = new THREE.SphereGeometry(0.06, 6, 6);
+  const jMat = new THREE.MeshStandardMaterial({ color: HAND_COLORS[h], emissive: HAND_COLORS[h], emissiveIntensity: 0.3 });
+  const joints = [];
+  for (let i = 0; i < JOINT_COUNT; i++) {
+    const m = new THREE.Mesh(jointGeo, jMat);
+    m.visible = false;
+    group.add(m);
+    joints.push(m);
+  }
+  const bMat = new THREE.LineBasicMaterial({ color: HAND_COLORS[h], linewidth: 2 });
+  const bones = [];
+  for (const [a, b] of HAND_CONNECTIONS) {
+    const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+    const line = new THREE.Line(geo, bMat);
+    line.visible = false;
+    group.add(line);
+    bones.push({ line, geo, a, b });
+  }
+  handSkeletons.push({ group, joints, bones });
+}
+
+// Map MediaPipe normalized coords to scene space
+function landmarkToScene(lm) {
+  return new THREE.Vector3(
+    -(lm.x - 0.5) * 12 + camera.position.x,
+    -(lm.y - 0.5) * 9 + camera.position.y,
+    camera.position.z - (4 + headPos.z * -4) + lm.z * -3
+  );
+}
+
+let currentHands = [null, null]; // landmarks per hand
+
+function updateHandSkeletons() {
+  for (let h = 0; h < 2; h++) {
+    const sk = handSkeletons[h];
+    const hand = currentHands[h];
+    if (!hand) {
+      for (const m of sk.joints) m.visible = false;
+      for (const b of sk.bones) b.line.visible = false;
+      continue;
+    }
+    const positions = [];
+    for (let i = 0; i < JOINT_COUNT; i++) {
+      const p = landmarkToScene(hand[i]);
+      positions.push(p);
+      sk.joints[i].position.copy(p);
+      sk.joints[i].visible = true;
+    }
+    for (const b of sk.bones) {
+      const posAttr = b.geo.attributes.position;
+      posAttr.setXYZ(0, positions[b.a].x, positions[b.a].y, positions[b.a].z);
+      posAttr.setXYZ(1, positions[b.b].x, positions[b.b].y, positions[b.b].z);
+      posAttr.needsUpdate = true;
+      b.line.visible = true;
+    }
+  }
 }
 
 // --- Head Tracking State ---
@@ -137,11 +243,12 @@ const PARALLAX_Y = 4;
 const PARALLAX_Z = 3;
 const SMOOTHING = 0.15; // exponential smoothing factor
 
-// --- Hand Tracking State ---
-let isPinching = false;
-let wasPinching = false;
-let handVisible = false;
-const pinchThreshold = 0.05; // normalized distance between thumb tip and index tip
+// --- Hand Tracking State (per hand) ---
+const handStates = [
+  { pinching: false, wasPinching: false, heldBall: null },
+  { pinching: false, wasPinching: false, heldBall: null },
+];
+const pinchThreshold = 0.05;
 
 // --- Worker Setup ---
 let faceWorker = null, handWorker = null;
@@ -152,7 +259,7 @@ function initWorkers() {
   faceWorker = new Worker('face-worker.js');
   faceWorker.onmessage = (e) => {
     if (e.data.type === 'init') { faceReady = true; updateStatus(); }
-    if (e.data.type === 'result') handleFaceResult(e.data.face);
+    if (e.data.type === 'result') { handleFaceResult(e.data.face); faceIdle = true; }
   };
   faceWorker.postMessage({ type: 'init' });
 
@@ -160,7 +267,7 @@ function initWorkers() {
   handWorker = new Worker('hand-worker.js');
   handWorker.onmessage = (e) => {
     if (e.data.type === 'init') { handReady = true; updateStatus(); }
-    if (e.data.type === 'result') handleHandResult(e.data.landmarks);
+    if (e.data.type === 'result') { handleHandResult(e.data.landmarks); handIdle = true; }
   };
   handWorker.postMessage({ type: 'init', numHands: 1 });
 }
@@ -180,7 +287,7 @@ function handleFaceResult(face) {
   // Depth from inter-eye distance (closer = larger distance between eyes)
   const eyeDist = Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y);
   if (refEyeDist === 0) refEyeDist = eyeDist; // calibrate on first detection
-  const rawZ = (eyeDist / refEyeDist) - 1;
+  const rawZ = -((eyeDist / refEyeDist) - 1); // inverted: lean in = camera forward
 
   // Exponential smoothing
   headSmooth.x += (rawX - headSmooth.x) * SMOOTHING;
@@ -193,85 +300,148 @@ function handleFaceResult(face) {
 }
 
 // --- Hand Result Handler ---
-// Detects pinch gesture from thumb-index distance
+// Detects pinch gesture per hand from thumb-index distance
 function handleHandResult(landmarks) {
-  if (!landmarks || landmarks.length === 0) {
-    handVisible = false;
-    isPinching = false;
-    return;
+  for (let h = 0; h < 2; h++) {
+    if (!landmarks || h >= landmarks.length) {
+      currentHands[h] = null;
+      handStates[h].pinching = false;
+      continue;
+    }
+    const hand = landmarks[h];
+    currentHands[h] = hand;
+    const dist = Math.hypot(
+      hand[4].x - hand[8].x,
+      hand[4].y - hand[8].y,
+      hand[4].z - hand[8].z
+    );
+    handStates[h].pinching = dist < pinchThreshold;
   }
-  handVisible = true;
-  const hand = landmarks[0];
-  const thumbTip = hand[4];  // landmark 4 = thumb tip
-  const indexTip = hand[8];  // landmark 8 = index finger tip
-
-  // 3D Euclidean distance between thumb and index tips
-  const dist = Math.hypot(
-    thumbTip.x - indexTip.x,
-    thumbTip.y - indexTip.y,
-    thumbTip.z - indexTip.z
-  );
-  isPinching = dist < pinchThreshold;
 }
 
 // --- Head-Coupled Parallax ---
 // Shifts camera position based on head tracking to create
 // a "window into the scene" effect (fish-tank VR)
+let parallaxEnabled = true;
+
 function applyHeadParallax() {
+  if (!parallaxEnabled) {
+    camera.position.set(0, 0, 8);
+    camera.lookAt(0, 0, -20);
+    return;
+  }
   const camX = headPos.x * PARALLAX_X;
   const camY = headPos.y * PARALLAX_Y;
   const camZ = 8 + headPos.z * PARALLAX_Z;
 
   camera.position.set(camX, camY, camZ);
-  camera.lookAt(0, 0, -5); // always look toward scene center
+  camera.lookAt(0, 0, -20);
 }
 
 // --- Gesture-Driven Game Input ---
-// Pinch gesture fires a projectile toward scene center
+// Pinch spawns a ball at pinch point; release fires with hand velocity (x,y) + gravity
 function handleGestureInput() {
-  // Fire on pinch release
-  if (wasPinching && !isPinching) {
-    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    fireProjectile(dir);
+  for (let h = 0; h < 2; h++) {
+    const hs = handStates[h];
+    const hand = currentHands[h];
+
+    if (hs.pinching && hand) {
+      const mid = {
+        x: (hand[4].x + hand[8].x) / 2,
+        y: (hand[4].y + hand[8].y) / 2,
+        z: (hand[4].z + hand[8].z) / 2,
+      };
+      const pos = landmarkToScene(mid);
+
+      if (!hs.heldBall) {
+        const geo = new THREE.SphereGeometry(0.1, 8, 8);
+        const mat = new THREE.MeshStandardMaterial({ color: 0xff6d00, emissive: 0xff3d00, emissiveIntensity: 2 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.copy(pos);
+        scene.add(mesh);
+        hs.heldBall = { mesh, mat, startTime: performance.now(), lastPos: pos.clone(), lastTime: performance.now(), vxHist: [], vyHist: [], svx: 0, svy: 0 };
+      } else {
+        // Track velocity via rolling window average
+        const now = performance.now();
+        const dt = (now - hs.heldBall.lastTime) / 1000;
+        if (dt > 0.001) {
+          const rawVx = (pos.x - hs.heldBall.lastPos.x) / dt;
+          const rawVy = (pos.y - hs.heldBall.lastPos.y) / dt;
+          hs.heldBall.vxHist.push(rawVx);
+          hs.heldBall.vyHist.push(rawVy);
+          if (hs.heldBall.vxHist.length > 8) hs.heldBall.vxHist.shift();
+          if (hs.heldBall.vyHist.length > 8) hs.heldBall.vyHist.shift();
+          hs.heldBall.svx = hs.heldBall.vxHist.reduce((s, v) => s + v, 0) / hs.heldBall.vxHist.length;
+          hs.heldBall.svy = hs.heldBall.vyHist.reduce((s, v) => s + v, 0) / hs.heldBall.vyHist.length;
+          hs.heldBall.lastPos.copy(pos);
+          hs.heldBall.lastTime = now;
+        }
+        hs.heldBall.mesh.position.copy(pos);
+        const t = Math.min((now - hs.heldBall.startTime) / 2000, 1);
+        hs.heldBall.mesh.scale.setScalar(1 + t * 2);
+        hs.heldBall.mat.emissiveIntensity = 2 + t * 6;
+      }
+    }
+
+    // Release: fire with hand velocity
+    if (hs.wasPinching && !hs.pinching && hs.heldBall) {
+      const origin = hs.heldBall.mesh.position.clone();
+      const vx = hs.heldBall.svx * 0.5;
+      const vy = hs.heldBall.svy * 0.5;
+      scene.remove(hs.heldBall.mesh);
+      hs.heldBall.mesh.scale.setScalar(1);
+      fireProjectile(origin, vx, vy);
+      hs.heldBall = null;
+    }
+
+    // Lost hand while charging: cancel
+    if (!hand && hs.heldBall) {
+      scene.remove(hs.heldBall.mesh);
+      hs.heldBall.mesh.geometry.dispose();
+      hs.heldBall.mat.dispose();
+      hs.heldBall = null;
+    }
+
+    hs.wasPinching = hs.pinching;
   }
-  wasPinching = isPinching;
 }
 
 // --- Frame Sending ---
-// Sends video frames to both workers concurrently via ImageBitmap transfer
+// Each worker independently tracks when it's ready for a new frame
+// This prevents slow hand detection (especially 2 hands) from blocking face tracking
 const video = document.getElementById('webcam');
-let sending = false;
+let faceIdle = true, handIdle = true;
 
 function sendFrames(timestamp) {
-  if (!faceReady || !handReady || sending) {
+  if (!faceReady && !handReady) {
     video.requestVideoFrameCallback(sendFrames);
     return;
   }
-  sending = true;
+  const now = performance.now();
 
-  // Create two independent ImageBitmaps from the same video frame
-  // Transfer ownership to workers (zero-copy)
-  Promise.all([
-    createImageBitmap(video),
-    createImageBitmap(video)
-  ]).then(([faceBmp, handBmp]) => {
-    faceWorker.postMessage(
-      { type: 'detect', image: faceBmp, timestamp: performance.now() },
-      [faceBmp]  // transfer list: ownership moves to worker
-    );
-    handWorker.postMessage(
-      { type: 'detect', image: handBmp, timestamp: performance.now() },
-      [handBmp]  // transfer list: ownership moves to worker
-    );
-    sending = false;
-  });
+  // Send to face worker if it's ready
+  if (faceReady && faceIdle) {
+    faceIdle = false;
+    createImageBitmap(video, { resizeWidth: 320, resizeHeight: 240 }).then(bmp => {
+      faceWorker.postMessage({ type: 'detect', image: bmp, timestamp: now }, [bmp]);
+    });
+  }
+
+  // Send to hand worker if it's ready (independent of face)
+  // Downscale to 320x240 for faster hand inference
+  if (handReady && handIdle) {
+    handIdle = false;
+    createImageBitmap(video, { resizeWidth: 320, resizeHeight: 240 }).then(bmp => {
+      handWorker.postMessage({ type: 'detect', image: bmp, timestamp: now }, [bmp]);
+    });
+  }
 
   video.requestVideoFrameCallback(sendFrames);
 }
 
 // --- Animation Loop ---
 const clock = new THREE.Clock();
-let frameCount = 0, lastFpsTime = 0;
+let frameCount = 0, lastFpsTime = 0, winShowing = false;
 
 function animate() {
   requestAnimationFrame(animate);
@@ -284,23 +454,55 @@ function animate() {
   // Gesture input
   handleGestureInput();
 
+  // Hand skeletons
+  updateHandSkeletons();
+
   // Animate cubes (gentle rotation)
   for (const cube of cubes) {
     cube.rotation.x += 0.003;
     cube.rotation.y += 0.005;
   }
 
-  // Update projectiles
+  // Update projectiles + collision detection
+  const HIT_DIST = 0.8; // collision radius
   for (let i = projectiles.length - 1; i >= 0; i--) {
     const p = projectiles[i];
-    p.mesh.position.addScaledVector(p.dir, p.speed * dt);
+    p.vy += GRAVITY_Y * dt; // gravity pulls down
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
     p.life -= dt;
-    if (p.life <= 0) {
+
+    // Check collision with cubes
+    let hit = false;
+    for (let j = cubes.length - 1; j >= 0; j--) {
+      if (p.mesh.position.distanceTo(cubes[j].position) < HIT_DIST) {
+        scene.remove(cubes[j]);
+        cubes[j].geometry.dispose();
+        cubes[j].material.dispose();
+        cubes.splice(j, 1);
+        hit = true;
+        break;
+      }
+    }
+
+    if (hit || p.life <= 0) {
       scene.remove(p.mesh);
       p.mesh.geometry.dispose();
       p.mesh.material.dispose();
       projectiles.splice(i, 1);
     }
+  }
+
+  // Win check
+  if (cubes.length === 0 && !winShowing) {
+    winShowing = true;
+    document.getElementById('winner').style.display = 'block';
+    setTimeout(() => {
+      document.getElementById('winner').style.display = 'none';
+      spawnCubes();
+      winShowing = false;
+    }, 1000);
   }
 
   // FPS counter
@@ -315,10 +517,12 @@ function animate() {
   document.getElementById('head-pos').textContent =
     `x:${headPos.x.toFixed(2)} y:${headPos.y.toFixed(2)} z:${headPos.z.toFixed(2)}`;
   const handEl = document.getElementById('hand-state');
-  handEl.textContent = handVisible ? 'Detected' : 'No hand';
+  const numHands = currentHands.filter(h => h).length;
+  handEl.textContent = numHands ? `${numHands} hand${numHands > 1 ? 's' : ''}` : 'No hand';
   const gestureEl = document.getElementById('gesture-state');
-  gestureEl.textContent = isPinching ? 'PINCH' : 'OPEN';
-  gestureEl.className = 'val ' + (isPinching ? 'pinch' : 'open');
+  const gestures = handStates.filter((hs, i) => currentHands[i]).map(hs => hs.pinching ? 'PINCH' : 'OPEN');
+  gestureEl.textContent = gestures.join(' / ') || '--';
+  gestureEl.className = 'val ' + (gestures.includes('PINCH') ? 'pinch' : 'open');
 
   renderer.render(scene, camera);
 }
@@ -330,20 +534,44 @@ function updateStatus() {
   if (!faceReady) parts.push('Loading face model...');
   if (!handReady) parts.push('Loading hand model...');
   if (parts.length === 0) {
-    statusEl.textContent = 'Move your head to shift perspective. Pinch to fire.';
+    statusEl.textContent = 'Move your head to shift perspective. Pinch and release to fire.';
     document.getElementById('hud').style.display = 'block';
+    document.getElementById('controls').style.display = 'block';
   } else {
     statusEl.textContent = parts.join(' ');
   }
 }
 
-document.getElementById('start-btn').addEventListener('click', async () => {
+document.getElementById('num-hands-select').addEventListener('change', (e) => {
+  const numHands = parseInt(e.target.value);
+  if (handWorker) {
+    handWorker.terminate();
+    handReady = false;
+    handIdle = true;
+    currentHands = [null, null];
+    statusEl.textContent = 'Reloading hand model...';
+    handWorker = new Worker('hand-worker.js');
+    handWorker.onmessage = (ev) => {
+      if (ev.data.type === 'init') { handReady = true; updateStatus(); }
+      if (ev.data.type === 'result') { handleHandResult(ev.data.landmarks); handIdle = true; }
+    };
+    handWorker.postMessage({ type: 'init', numHands });
+  }
+  e.target.blur();
+});
+
+document.getElementById('parallax-select').addEventListener('change', (e) => {
+  parallaxEnabled = e.target.value === 'on';
+  e.target.blur();
+});
+
+async function startCamera() {
   document.getElementById('start-btn').style.display = 'none';
   statusEl.textContent = 'Starting camera...';
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+      video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 360 } }
     });
     video.srcObject = stream;
     await video.play();
@@ -359,6 +587,11 @@ document.getElementById('start-btn').addEventListener('click', async () => {
   } catch (err) {
     statusEl.textContent = 'Camera error: ' + err.message;
   }
+}
+
+document.getElementById('start-btn').addEventListener('click', startCamera);
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') startCamera();
 });
 
 // Resize handler
