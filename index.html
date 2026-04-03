@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Parallax + Hand Tracking Demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; }
+  #hud {
+    position: fixed; bottom: 16px; left: 16px; z-index: 10;
+    font-size: 0.85rem; line-height: 1.6; color: #ccc;
+    background: rgba(10,10,26,0.8); padding: 12px 16px; border-radius: 8px;
+    border: 1px solid #333; backdrop-filter: blur(8px); max-width: 340px;
+  }
+  #hud .label { color: #888; }
+  #hud .val { color: #4fc3f7; font-weight: 600; }
+  #hud .pinch { color: #ff6d00; }
+  #hud .open { color: #4fc3f7; }
+  #start-btn {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    z-index: 20; padding: 16px 32px; font-size: 1.2rem; background: #4fc3f7;
+    color: #0a0a1a; border: none; border-radius: 8px; cursor: pointer; font-weight: 700;
+  }
+  #start-btn:hover { background: #81d4fa; }
+  #status {
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 10; font-size: 0.8rem; color: #888;
+  }
+</style>
+</head>
+<body>
+
+<div id="status">Click Start to enable camera</div>
+<button id="start-btn">Start Camera</button>
+
+<div id="hud" style="display:none;">
+  <div><span class="label">Head: </span><span id="head-pos" class="val">--</span></div>
+  <div><span class="label">Hand: </span><span id="hand-state" class="val">--</span></div>
+  <div><span class="label">Gesture: </span><span id="gesture-state" class="val">--</span></div>
+  <div><span class="label">FPS: </span><span id="fps" class="val">--</span></div>
+</div>
+
+<video id="webcam" autoplay playsinline style="display:none;"></video>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ============================================================
+// METHOD: Single-Camera Head-Coupled Parallax + Hand Gesture Input
+//
+// Architecture:
+//   1. Single consumer webcam (getUserMedia, no depth sensor)
+//   2. Two concurrent Web Workers:
+//      - Face Worker: MediaPipe FaceDetector for head position
+//      - Hand Worker: MediaPipe HandLandmarker for gesture recognition
+//   3. ImageBitmap transfer: video frames sent to workers without copying
+//   4. Head position drives camera offset (head-coupled parallax / fish-tank VR)
+//   5. Hand landmarks drive gesture detection (pinch = fire, open = idle)
+//   6. Three.js renders the parallax-corrected 3D scene
+//   7. Runs entirely in-browser, no plugins, no special hardware
+// ============================================================
+
+// --- 3D Scene Setup ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a1a);
+scene.fog = new THREE.FogExp2(0x0a0a1a, 0.015);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 8);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+// Lighting
+const ambient = new THREE.AmbientLight(0x334466, 0.8);
+scene.add(ambient);
+const pointLight = new THREE.PointLight(0xff6d00, 2, 50);
+pointLight.position.set(0, 5, 5);
+scene.add(pointLight);
+
+// Grid of cubes as the 3D environment
+const cubes = [];
+const geometry = new THREE.BoxGeometry(0.6, 0.6, 0.6);
+for (let x = -4; x <= 4; x += 2) {
+  for (let y = -3; y <= 3; y += 2) {
+    for (let z = -10; z <= -2; z += 2) {
+      const hue = (x + 4) / 8;
+      const color = new THREE.Color().setHSL(hue, 0.6, 0.4);
+      const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3 });
+      const cube = new THREE.Mesh(geometry, mat);
+      cube.position.set(x, y, z);
+      cube.userData.basePos = cube.position.clone();
+      scene.add(cube);
+      cubes.push(cube);
+    }
+  }
+}
+
+// Projectile pool
+const projectiles = [];
+
+function fireProjectile(dir) {
+  const geo = new THREE.SphereGeometry(0.15, 8, 8);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff6d00, emissive: 0xff3d00, emissiveIntensity: 2 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(camera.position);
+  scene.add(mesh);
+  projectiles.push({
+    mesh, dir: dir.clone().normalize(),
+    speed: 30, life: 3.0
+  });
+}
+
+// --- Head Tracking State ---
+const headPos = { x: 0, y: 0, z: 0 };       // smoothed head position (-1 to +1)
+const headSmooth = { x: 0, y: 0, z: 0 };     // smoothing buffer
+let refEyeDist = 0;                            // reference inter-eye distance for z
+
+// Parallax scaling (world units of camera shift at full head offset)
+const PARALLAX_X = 6;
+const PARALLAX_Y = 4;
+const PARALLAX_Z = 3;
+const SMOOTHING = 0.15; // exponential smoothing factor
+
+// --- Hand Tracking State ---
+let isPinching = false;
+let wasPinching = false;
+let handVisible = false;
+const pinchThreshold = 0.05; // normalized distance between thumb tip and index tip
+
+// --- Worker Setup ---
+let faceWorker = null, handWorker = null;
+let faceReady = false, handReady = false;
+
+function initWorkers() {
+  // Face detection worker
+  faceWorker = new Worker('face-worker.js');
+  faceWorker.onmessage = (e) => {
+    if (e.data.type === 'init') { faceReady = true; updateStatus(); }
+    if (e.data.type === 'result') handleFaceResult(e.data.face);
+  };
+  faceWorker.postMessage({ type: 'init' });
+
+  // Hand landmark worker
+  handWorker = new Worker('hand-worker.js');
+  handWorker.onmessage = (e) => {
+    if (e.data.type === 'init') { handReady = true; updateStatus(); }
+    if (e.data.type === 'result') handleHandResult(e.data.landmarks);
+  };
+  handWorker.postMessage({ type: 'init', numHands: 1 });
+}
+
+// --- Face Result Handler ---
+// Extracts head position from eye keypoints for parallax
+function handleFaceResult(face) {
+  if (!face) return;
+  const kp = face.keypoints;
+  // MediaPipe face detector: keypoint 0 = left eye, keypoint 1 = right eye
+  const leftEye = kp[0], rightEye = kp[1];
+
+  // Horizontal and vertical position: normalized -1 to +1
+  const rawX = ((leftEye.x + rightEye.x) / 2 - 0.5) * 2;
+  const rawY = -((leftEye.y + rightEye.y) / 2 - 0.5) * 2;
+
+  // Depth from inter-eye distance (closer = larger distance between eyes)
+  const eyeDist = Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y);
+  if (refEyeDist === 0) refEyeDist = eyeDist; // calibrate on first detection
+  const rawZ = (eyeDist / refEyeDist) - 1;
+
+  // Exponential smoothing
+  headSmooth.x += (rawX - headSmooth.x) * SMOOTHING;
+  headSmooth.y += (rawY - headSmooth.y) * SMOOTHING;
+  headSmooth.z += (rawZ - headSmooth.z) * SMOOTHING;
+
+  headPos.x = headSmooth.x;
+  headPos.y = headSmooth.y;
+  headPos.z = headSmooth.z;
+}
+
+// --- Hand Result Handler ---
+// Detects pinch gesture from thumb-index distance
+function handleHandResult(landmarks) {
+  if (!landmarks || landmarks.length === 0) {
+    handVisible = false;
+    isPinching = false;
+    return;
+  }
+  handVisible = true;
+  const hand = landmarks[0];
+  const thumbTip = hand[4];  // landmark 4 = thumb tip
+  const indexTip = hand[8];  // landmark 8 = index finger tip
+
+  // 3D Euclidean distance between thumb and index tips
+  const dist = Math.hypot(
+    thumbTip.x - indexTip.x,
+    thumbTip.y - indexTip.y,
+    thumbTip.z - indexTip.z
+  );
+  isPinching = dist < pinchThreshold;
+}
+
+// --- Head-Coupled Parallax ---
+// Shifts camera position based on head tracking to create
+// a "window into the scene" effect (fish-tank VR)
+function applyHeadParallax() {
+  const camX = headPos.x * PARALLAX_X;
+  const camY = headPos.y * PARALLAX_Y;
+  const camZ = 8 + headPos.z * PARALLAX_Z;
+
+  camera.position.set(camX, camY, camZ);
+  camera.lookAt(0, 0, -5); // always look toward scene center
+}
+
+// --- Gesture-Driven Game Input ---
+// Pinch gesture fires a projectile toward scene center
+function handleGestureInput() {
+  // Fire on pinch release
+  if (wasPinching && !isPinching) {
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    fireProjectile(dir);
+  }
+  wasPinching = isPinching;
+}
+
+// --- Frame Sending ---
+// Sends video frames to both workers concurrently via ImageBitmap transfer
+const video = document.getElementById('webcam');
+let sending = false;
+
+function sendFrames(timestamp) {
+  if (!faceReady || !handReady || sending) {
+    video.requestVideoFrameCallback(sendFrames);
+    return;
+  }
+  sending = true;
+
+  // Create two independent ImageBitmaps from the same video frame
+  // Transfer ownership to workers (zero-copy)
+  Promise.all([
+    createImageBitmap(video),
+    createImageBitmap(video)
+  ]).then(([faceBmp, handBmp]) => {
+    faceWorker.postMessage(
+      { type: 'detect', image: faceBmp, timestamp: performance.now() },
+      [faceBmp]  // transfer list: ownership moves to worker
+    );
+    handWorker.postMessage(
+      { type: 'detect', image: handBmp, timestamp: performance.now() },
+      [handBmp]  // transfer list: ownership moves to worker
+    );
+    sending = false;
+  });
+
+  video.requestVideoFrameCallback(sendFrames);
+}
+
+// --- Animation Loop ---
+const clock = new THREE.Clock();
+let frameCount = 0, lastFpsTime = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  const now = performance.now();
+
+  // Head-coupled parallax
+  applyHeadParallax();
+
+  // Gesture input
+  handleGestureInput();
+
+  // Animate cubes (gentle rotation)
+  for (const cube of cubes) {
+    cube.rotation.x += 0.003;
+    cube.rotation.y += 0.005;
+  }
+
+  // Update projectiles
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.mesh.position.addScaledVector(p.dir, p.speed * dt);
+    p.life -= dt;
+    if (p.life <= 0) {
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      p.mesh.material.dispose();
+      projectiles.splice(i, 1);
+    }
+  }
+
+  // FPS counter
+  frameCount++;
+  if (now - lastFpsTime > 1000) {
+    document.getElementById('fps').textContent = frameCount;
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+
+  // Update HUD
+  document.getElementById('head-pos').textContent =
+    `x:${headPos.x.toFixed(2)} y:${headPos.y.toFixed(2)} z:${headPos.z.toFixed(2)}`;
+  const handEl = document.getElementById('hand-state');
+  handEl.textContent = handVisible ? 'Detected' : 'No hand';
+  const gestureEl = document.getElementById('gesture-state');
+  gestureEl.textContent = isPinching ? 'PINCH' : 'OPEN';
+  gestureEl.className = 'val ' + (isPinching ? 'pinch' : 'open');
+
+  renderer.render(scene, camera);
+}
+
+// --- Startup ---
+const statusEl = document.getElementById('status');
+function updateStatus() {
+  const parts = [];
+  if (!faceReady) parts.push('Loading face model...');
+  if (!handReady) parts.push('Loading hand model...');
+  if (parts.length === 0) {
+    statusEl.textContent = 'Move your head to shift perspective. Pinch to fire.';
+    document.getElementById('hud').style.display = 'block';
+  } else {
+    statusEl.textContent = parts.join(' ');
+  }
+}
+
+document.getElementById('start-btn').addEventListener('click', async () => {
+  document.getElementById('start-btn').style.display = 'none';
+  statusEl.textContent = 'Starting camera...';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    statusEl.textContent = 'Loading ML models...';
+    initWorkers();
+
+    // Start sending frames once video is playing
+    video.requestVideoFrameCallback(sendFrames);
+
+    // Start render loop
+    animate();
+  } catch (err) {
+    statusEl.textContent = 'Camera error: ' + err.message;
+  }
+});
+
+// Resize handler
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+</script>
+</body>
+</html>
