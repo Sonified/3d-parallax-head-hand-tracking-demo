@@ -1,5 +1,6 @@
 // Face detection worker: runs MediaPipe FaceDetector off main thread
 // Key technique: receives ImageBitmap via transferable, returns face keypoints
+importScripts('mediapipe-vision.js');
 
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite';
@@ -7,17 +8,8 @@ const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_detector
 let detector = null;
 
 async function init() {
-  // Load MediaPipe vision bundle into worker scope
-  // The ESM bundle must be patched to work in a classic Worker context:
-  // we fetch the source, replace its export statement with a self.$ assignment
-  const resp = await fetch('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs');
-  let src = await resp.text();
-  src = src.replace(/export\{([^}]+)\}/, 'self.$mediapipe={$1}');
-  const blob = new Blob([src], { type: 'application/javascript' });
-  importScripts(URL.createObjectURL(blob));
-
-  const vision = await self.$mediapipe.FilesetResolver.forVisionTasks(WASM_URL);
-  detector = await self.$mediapipe.FaceDetector.createFromOptions(vision, {
+  const vision = await $mediapipe.FilesetResolver.forVisionTasks(WASM_URL);
+  detector = await $mediapipe.FaceDetector.createFromOptions(vision, {
     baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
     runningMode: 'VIDEO',
     minDetectionConfidence: 0.3,
