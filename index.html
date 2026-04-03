@@ -87,8 +87,11 @@ document.body.appendChild(renderer.domElement);
 const ambient = new THREE.AmbientLight(0x334466, 0.8);
 scene.add(ambient);
 const pointLight = new THREE.PointLight(0xff6d00, 2, 50);
-pointLight.position.set(0, 5, 5);
+pointLight.position.set(0, 3, -4);
+const fillLight = new THREE.DirectionalLight(0x4488cc, 0.6);
+fillLight.position.set(-5, 2, 2);
 scene.add(pointLight);
+scene.add(fillLight);
 
 // Grid of cubes as the 3D environment
 const cubes = [];
@@ -171,7 +174,7 @@ function handleFaceResult(face) {
   const leftEye = kp[0], rightEye = kp[1];
 
   // Horizontal and vertical position: normalized -1 to +1
-  const rawX = ((leftEye.x + rightEye.x) / 2 - 0.5) * 2;
+  const rawX = -((leftEye.x + rightEye.x) / 2 - 0.5) * 2; // negated: webcam is mirrored
   const rawY = -((leftEye.y + rightEye.y) / 2 - 0.5) * 2;
 
   // Depth from inter-eye distance (closer = larger distance between eyes)
