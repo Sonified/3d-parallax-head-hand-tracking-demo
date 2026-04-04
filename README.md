@@ -99,6 +99,10 @@ This project combines several individually well-established techniques into a un
 
 The specific combination of simultaneous head-coupled parallax rendering and hand gesture game input from a single consumer RGB camera, running entirely in-browser without plugins or depth sensors, with concurrent Web Worker ML inference sharing one video feed, is to the author's knowledge a novel system architecture as of the date of this publication.
 
+## Related: WebGPU Vision
+
+The WebGPU compute shader inference approach described above is implemented as a standalone open-source library: [webgpu-vision](https://github.com/Sonified/webgpu-vision). It provides the full hand and face tracking pipeline running on ONNX Runtime Web with WebGPU backend, replacing MediaPipe's sealed WASM/WebGL binary. This is the recommended approach for bringing ML inference off the main thread and achieving the performance gains described in this document.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
