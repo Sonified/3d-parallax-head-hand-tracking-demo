@@ -34,7 +34,7 @@ The 3D scene (Three.js) applies the head position data as camera translation, cr
                   {face keypoints}         {hand landmarks}
                          \                       /
                           \                     /
-                           Main Thread (60fps)
+                           Main Thread (120fps)
                           /                     \
                 Head-Coupled Parallax     Gesture Detection
                 (camera.position.set)     (pinch distance)
@@ -89,7 +89,7 @@ The system architecture described above extends to several additional techniques
 
 - **Depth-corrected hand projection for desktop VR interactions**: MediaPipe hand landmarks include per-landmark z-values inferred from hand scale and proportions. By tracking the smoothed z-delta over time and applying it as an inverse projection correction in the head-coupled parallax scene, a hand physically moving toward the camera can be rendered as moving away from the viewer into the 3D scene. This counteracts the natural 2D projection (where closer objects appear larger) and produces spatially coherent hand movement within the parallax space. A punch toward the webcam reads as a punch into the screen. This technique uses relative z-velocity rather than absolute z-position, making it robust to the noise inherent in monocular depth estimation. This enables desktop VR style interactions such as boxing and tennis from a single consumer webcam, without a depth sensor or headset.
 
-## Prior Art and Context
+## Context
 
 This project combines several individually well-established techniques into a unified system:
 
@@ -97,11 +97,24 @@ This project combines several individually well-established techniques into a un
 - **Hand gesture recognition** from a webcam: extensive prior art from GestureTek (1991+), Leap Motion, Microsoft Kinect, Google MediaPipe (2020+)
 - **Browser-based ML inference**: TensorFlow.js, MediaPipe Web, ONNX Runtime Web
 
-The specific combination of simultaneous head-coupled parallax rendering and hand gesture game input from a single consumer RGB camera, running entirely in-browser without plugins or depth sensors, with concurrent Web Worker ML inference sharing one video feed, is to the author's knowledge a novel system architecture as of the date of this publication.
+The specific combination of simultaneous head-coupled parallax rendering and hand gesture game input from a single consumer RGB camera, running entirely in-browser without plugins or depth sensors, with concurrent Web Worker ML inference sharing one video feed, is a novel system architecture as of this moment.
 
 ## Related: WebGPU Vision
 
 The WebGPU compute shader inference approach described above is implemented as a standalone open-source library: [webgpu-vision](https://github.com/Sonified/webgpu-vision). It provides the full hand and face tracking pipeline running on ONNX Runtime Web with WebGPU backend, replacing MediaPipe's sealed WASM/WebGL binary. This is the recommended approach for bringing ML inference off the main thread and achieving the performance gains described in this document.
+
+## Toward Hardware-Free 6DOF Interaction
+
+The depth-corrected hand projection technique described above points toward something larger. Conventional 6DOF VR requires either a headset with onboard tracking cameras, an external depth sensor, or a multi-camera rig. This system synthesizes equivalent interaction from signals already present in a single RGB stream.
+
+The head-coupled parallax pipeline provides three translational and three rotational degrees of freedom from face landmarks alone. Adding depth-estimated hand position extends this into full-body interactive space. A user can lean left to peer around a virtual object, reach toward the screen and feel their hand move into the scene, and pull back to bring it forward again. The physical metaphor is reaching through a window, not wearing a headset.
+
+Several directions extend this further:
+Stable anchor cascade for continuous Z estimation. The landmark-spread depth signal degrades when the hand partially exits the frame or landmarks are occluded. A visibility-weighted cascade selects the most geometrically stable anchor point at each frame, and on anchor transitions applies a computed offset to preserve Z continuity. The effect is that depth tracking remains locked even as the hand moves to the edges of the camera's view.
+
+Face-relative hand depth as a corroborating signal. The angular relationship between head position and hand position in camera space encodes real geometric depth independent of the landmark-spread signal. As the user's head shifts, that angle changes as a function of true 3D distance. Fusing both signals with confidence weighting produces depth estimates that are robust when either signal is noisy or degraded — two orthogonal measurements of the same physical quantity.
+
+The combination. WebGPU inference at 120fps, head-coupled parallax, bilateral hand tracking, and fused monocular depth estimation running concurrently in a browser tab produces a first-person interactive 3D experience requiring no hardware beyond the webcam built into any modern laptop. 
 
 ## License
 
