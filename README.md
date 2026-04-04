@@ -85,6 +85,8 @@ The system architecture described above extends to several additional techniques
 
 - **WebGPU compute shader inference**: The hand and face tracking ML models (BlazePalm, Hand Landmark, BlazeFace, Face Landmark) can be extracted as ONNX format neural networks and executed via ONNX Runtime Web with a WebGPU compute shader backend, eliminating the synchronous glReadPixels bottleneck present in WebGL-based inference. This enables parallel two-hand landmark inference in separate Web Workers, each with independent WebGPU device contexts, achieving 120fps+ tracking with zero CPU readback during preprocessing (GPU letterbox, GPU affine warp between detection and landmark stages via Tensor.fromGpuBuffer).
 
+- **Face blendshape coefficients for networked expression sync**: The face landmark pipeline can additionally produce 52 blendshape coefficients (eyeBlinkLeft, mouthSmileLeft, browOuterUpRight, jawOpen, etc.) via a dedicated blendshape inference worker running in parallel with the landmark worker. These 52 floats (208 bytes per frame) fully describe facial expression state and can be transmitted over a WebRTC data channel at 30fps (6.2KB/sec) to drive avatar animation on a remote client. This enables real-time facial expression mirroring in multiplayer browser applications at a fraction of the bandwidth cost of transmitting raw landmark coordinates (5.7KB per frame for 478 landmarks). The blendshape worker runs fire-and-forget with one frame of latency, adding zero fps overhead to the tracking pipeline.
+
 ## Prior Art and Context
 
 This project combines several individually well-established techniques into a unified system:
