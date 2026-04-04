@@ -85,8 +85,6 @@ The system architecture described above extends to several additional techniques
 
 - **WebGPU compute shader inference**: The hand and face tracking ML models (BlazePalm, Hand Landmark, BlazeFace, Face Landmark) can be extracted as ONNX format neural networks and executed via ONNX Runtime Web with a WebGPU compute shader backend, eliminating the synchronous glReadPixels bottleneck present in WebGL-based inference. This enables parallel two-hand landmark inference in separate Web Workers, each with independent WebGPU device contexts, achieving 120fps+ tracking with zero CPU readback during preprocessing (GPU letterbox, GPU affine warp between detection and landmark stages via Tensor.fromGpuBuffer).
 
-- **Geometric feature extraction for gesture classification**: A 45-feature geometric representation of hand landmarks (10 fingertip pairwise distances, 12 thumb-to-joint distances, 15 joint flexion angles, 4 inter-finger spreads, palm openness, and 3 palm orientation angles) provides a rotation-invariant yet orientation-aware feature set for real-time gesture classification via lightweight MLP, suitable for distinguishing ASL fingerspelling letters and game gestures.
-
 ## Prior Art and Context
 
 This project combines several individually well-established techniques into a unified system:
