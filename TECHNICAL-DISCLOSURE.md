@@ -6,35 +6,7 @@
 
 This document is a public technical disclosure establishing prior art for the methods described below. Some techniques are implemented in this repository; others are implemented in related private repositories and disclosed here. All methods described are the original work of the author.
 
-### System Claim
-
-The methods described in this document individually draw on established techniques in computer vision, browser ML inference, and spatial audio. The novel contribution is their integration: a unified real-time system in which a single consumer camera, including but not limited to a built-in webcam, simultaneously drives head-coupled visual parallax, bilateral hand tracking with derived depth, world-locked spatial audio, and GPU-accelerated ML inference (for example via WebGPU compute shaders), all running concurrently in an unmodified browser tab or comparable client-side runtime on commodity hardware. The combination produces a first-person audiovisual 3D experience with 6DOF-equivalent interaction requiring no headset, depth sensor, or specialized hardware. No prior system is known to combine these elements in this configuration as of the date of this publication.
-
----
-
-## 1. Hardware-Free 6DOF Interaction
-
-Conventional 6DOF VR requires either a headset with onboard tracking cameras, an external depth sensor, or a multi-camera rig. This system synthesizes equivalent interaction from signals already present in a single RGB stream, including but not limited to a consumer webcam.
-
-The head-coupled parallax pipeline provides three translational and three rotational degrees of freedom from face landmarks or other facial feature detection methods. Adding depth-estimated hand position extends this into full-body interactive space. A user can, for example, lean left to peer around a virtual object, reach toward the screen and feel their hand move into the scene, and pull back to bring it forward again. The physical metaphor is reaching through a window, not wearing a headset. This interaction model is fully implemented and demonstrated in a related private repository as of the date of this disclosure.
-
-Several techniques make this work:
-
-**Stable anchor cascade for continuous Z estimation.** The landmark-spread depth signal may degrade when the hand partially exits the frame or landmarks are occluded. A stability-aware selection mechanism, such as a visibility-weighted cascade, selects the most geometrically stable anchor point at each frame. On anchor transitions, the system applies a computed offset or other continuity-preserving correction to maintain Z continuity. The effect is that depth tracking remains locked even as the hand moves to the edges of the camera's view. In aiming applications, for example, when distal landmarks such as fingertip positions drop below a confidence threshold, the system may fall back to more proximal landmarks such as the wrist or palm base while preserving the last known depth estimate, maintaining continuous aim ray stability through high-uncertainty poses.
-
-**Face-relative hand depth as a corroborating signal.** The angular relationship between head position and hand position in camera space encodes real geometric depth independent of the landmark-spread signal. As the user's head shifts, that angle changes as a function of true 3D distance. Fusing both signals, for example using confidence weighting, produces depth estimates that are robust when either signal is noisy or degraded. More generally, any technique that combines two or more orthogonal monocular depth cues, including but not limited to landmark spread, face-relative angular geometry, apparent size, or other camera-derived signals, to produce a fused depth estimate falls within this approach.
-
-**The combination.** GPU-accelerated inference (for example via WebGPU) at interactive frame rates (for example 120fps or higher), head-coupled parallax, bilateral hand tracking, and fused monocular depth estimation running concurrently in a browser tab or comparable client-side runtime produces a first-person interactive 3D experience requiring no hardware beyond the camera built into any modern laptop or similar consumer device.
-
-## 2. Single-Camera Head-Coupled Parallax + Hand Gesture Input
-
-A browser-based system using a single consumer webcam to simultaneously drive head-coupled 3D parallax and hand gesture recognition for real-time interactive input. No depth sensor, no plugins, no special hardware.
-
-A single RGB camera feed (for example via `getUserMedia` or another video capture API) is shared between two or more concurrent ML inference pipelines running in separate execution contexts, such as Web Workers, threads, or processes. Face detection extracts head position from facial keypoints, including but not limited to eye landmarks (for example, midpoint for x/y, inter-eye distance for z depth proxy). Hand landmark detection extracts 3D landmarks (for example 21 per hand per frame) for gesture recognition. Inference contexts may receive video frames via zero-copy transfer mechanisms such as `ImageBitmap` via `postMessage`, shared memory, or other efficient frame-sharing approaches. All ML inference runs off the main rendering thread, preserving smooth interactive rendering at rates including 120fps or higher.
-
-The 3D scene (rendered using any suitable 3D engine, such as Three.js, WebGL, or WebGPU) applies head position as camera translation, creating the illusion of looking through a window into 3D space. Forward and backward head movement, derived from facial feature geometry such as inter-eye distance, maps to camera Z translation in the 3D scene. The viewer physically leans in to move deeper into the space, and leans back to retreat. This produces a direct physical metaphor for scene traversal requiring no controller input. Hand gestures simultaneously trigger interactive events.
-
-The specific combination of simultaneous head-coupled parallax rendering and hand gesture interactive input from a single consumer RGB camera, running entirely in a client-side runtime such as a browser without plugins or depth sensors, with concurrent off-thread ML inference sharing one video feed, is a novel system architecture as of the date of this publication.
+This disclosure describes four independent invention families. Each independent claim stands alone without requiring the others. Dependent claims within each family add specificity and narrow the implementation space.
 
 ### Prior art context
 
@@ -42,21 +14,49 @@ The specific combination of simultaneous head-coupled parallax rendering and han
 - **Hand gesture recognition** from a webcam: GestureTek (1991+), Leap Motion, Microsoft Kinect, Google MediaPipe (2020+)
 - **Browser-based ML inference**: TensorFlow.js, MediaPipe Web, ONNX Runtime Web
 
-## 3. Depth-Corrected Hand Projection for Desktop VR Interactions
+---
+
+## Claim I. Embodied Interaction System from a Single RGB Camera
+
+A unified real-time system in which a single consumer camera, including but not limited to a built-in webcam, simultaneously drives head-coupled visual parallax, bilateral hand tracking with derived depth, world-locked spatial audio, and GPU-accelerated ML inference (for example via WebGPU compute shaders), all running concurrently in an unmodified browser tab or comparable client-side runtime on commodity hardware. The combination produces a first-person audiovisual 3D experience with 6DOF-equivalent interaction requiring no headset, depth sensor, or specialized hardware. No prior system is known to combine these elements in this configuration as of the date of this publication.
+
+Conventional 6DOF VR requires either a headset with onboard tracking cameras, an external depth sensor, or a multi-camera rig. This system synthesizes equivalent interaction from signals already present in a single RGB stream, including but not limited to a consumer webcam.
+
+The head-coupled parallax pipeline provides three translational and three rotational degrees of freedom from face landmarks or other facial feature detection methods. Adding depth-estimated hand position extends this into full-body interactive space. A user can, for example, lean left to peer around a virtual object, reach toward the screen and feel their hand move into the scene, and pull back to bring it forward again. The physical metaphor is reaching through a window, not wearing a headset. This interaction model is fully implemented and demonstrated in a related private repository as of the date of this disclosure.
+
+GPU-accelerated inference (for example via WebGPU) at interactive frame rates (for example 120fps or higher), head-coupled parallax, bilateral hand tracking, and fused monocular depth estimation running concurrently in a browser tab or comparable client-side runtime produces a first-person interactive 3D experience requiring no hardware beyond the camera built into any modern laptop or similar consumer device.
+
+### I.A. Head-Coupled Visual Parallax with Concurrent Hand Gesture Input
+
+A single RGB camera feed (for example via `getUserMedia` or another video capture API) is shared between two or more concurrent ML inference pipelines running in separate execution contexts, such as Web Workers, threads, or processes. Face detection extracts head position from facial keypoints, including but not limited to eye landmarks (for example, midpoint for x/y, inter-eye distance for z depth proxy). Hand landmark detection extracts 3D landmarks (for example 21 per hand per frame) for gesture recognition. Inference contexts may receive video frames via zero-copy transfer mechanisms such as `ImageBitmap` via `postMessage`, shared memory, or other efficient frame-sharing approaches. All ML inference runs off the main rendering thread, preserving smooth interactive rendering at rates including 120fps or higher.
+
+The 3D scene (rendered using any suitable 3D engine, such as Three.js, WebGL, or WebGPU) applies head position as camera translation, creating the illusion of looking through a window into 3D space. Forward and backward head movement, derived from facial feature geometry such as inter-eye distance, maps to camera Z translation in the 3D scene. The viewer physically leans in to move deeper into the space, and leans back to retreat. This produces a direct physical metaphor for scene traversal requiring no controller input. Hand gestures simultaneously trigger interactive events.
+
+The specific combination of simultaneous head-coupled parallax rendering and hand gesture interactive input from a single consumer RGB camera, running entirely in a client-side runtime such as a browser without plugins or depth sensors, with concurrent off-thread ML inference sharing one video feed, is a novel system architecture as of the date of this publication.
+
+### I.B. Depth-Corrected Hand Projection for Desktop VR Interactions
 
 Hand landmark models, including but not limited to MediaPipe, produce per-landmark z-values inferred from hand scale and proportions. By tracking a smoothed depth derivative such as z-delta over time and applying it as an inverse projection correction in the head-coupled parallax scene, a hand physically moving toward the camera can be rendered as moving away from the viewer into the 3D scene. This counteracts the natural 2D projection (where closer objects appear larger) and produces spatially coherent hand movement within the parallax space. For example, a punch toward the webcam reads as a punch into the screen.
 
 This technique uses relative z-velocity rather than absolute z-position, making it robust to the noise inherent in monocular depth estimation. This enables desktop VR style interactions, including for example boxing, tennis, or other gesture-driven spatial interactions, from a single consumer webcam, without a depth sensor or headset.
 
-## 4. Parallax-Coupled Hand Gesture Coordinate System
+### I.C. Parallax-Coupled Hand Gesture Coordinate System
 
 Hand landmarks are mapped to 3D scene space relative to the current parallax camera position. The hand "rides with" the head-coupled perspective shift. Most systems treat hand position and head tracking as independent coordinate systems. Coupling them makes the hand feel like it exists inside the parallax window rather than floating in front of it. This is central to producing coherent first-person interaction in a head-coupled parallax scene.
 
-## 5. Head-Tracked Spatial Audio via AudioListener Sync
+### I.D. Stable Anchor Cascade for Continuous Z Estimation
+
+The landmark-spread depth signal may degrade when the hand partially exits the frame or landmarks are occluded. A stability-aware selection mechanism, such as a visibility-weighted cascade, selects the most geometrically stable anchor point at each frame. On anchor transitions, the system applies a computed offset or other continuity-preserving correction to maintain Z continuity. The effect is that depth tracking remains locked even as the hand moves to the edges of the camera's view. In aiming applications, for example, when distal landmarks such as fingertip positions drop below a confidence threshold, the system may fall back to more proximal landmarks such as the wrist or palm base while preserving the last known depth estimate, maintaining continuous aim ray stability through high-uncertainty poses.
+
+### I.E. Fused Monocular Depth from Orthogonal Cues
+
+The angular relationship between head position and hand position in camera space encodes real geometric depth independent of the landmark-spread signal. As the user's head shifts, that angle changes as a function of true 3D distance. Fusing both signals, for example using confidence weighting, produces depth estimates that are robust when either signal is noisy or degraded. More generally, any technique that combines two or more orthogonal monocular depth cues, including but not limited to landmark spread, face-relative angular geometry, apparent size, or other camera-derived signals, to produce a fused depth estimate falls within this approach.
+
+### I.F. Head-Tracked Spatial Audio
 
 The same face-tracking data that drives head-coupled visual parallax simultaneously drives a spatial audio listener position, for example via the Web Audio API AudioListener or any equivalent spatial audio system. Each frame, the listener coordinates are set from the parallax camera position, which is itself computed from webcam-tracked facial features such as eye midpoint and inter-eye distance. When the user physically leans left, both the visual perspective and the audio perspective shift together: audio sources pan compensatorily rightward, remaining world-locked in the 3D scene rather than fixed to the listener's head. This is a single face-tracking pipeline producing two output modalities (visual parallax and spatial audio) in real time, coupling two systems that are normally independent.
 
-## 6. Per-Source Doppler Shift via Manual Velocity Projection
+### I.G. Per-Source Doppler Shift via Velocity Projection
 
 Web Audio API's built-in dopplerFactor was deprecated and removed from all major browsers. This system reimplements Doppler from first principles: each frame, the sound source's velocity vector is projected onto the normalized source-to-listener unit vector to obtain radial velocity, then a Doppler frequency scaling formula is applied to the source frequency each frame. This approach applies to any sound source type, including but not limited to oscillators, sampled audio, and synthesized signals. The effective speed of sound is user-tunable, allowing Doppler intensity to range from imperceptible to extreme.
 
@@ -64,13 +64,13 @@ The Doppler ratio may be applied independently to two or more parallel signal pa
 
 Combined with head-tracked listener position, the result is that a projectile passing the listener's head produces correlated changes across four or more perceptual dimensions simultaneously, including visual position, binaural pan, pitch, and timbre.
 
-## 7. Proximity-Driven Spectral Unmasking for Perceptual Mass
+### I.H. Proximity-Driven Spectral Unmasking for Perceptual Mass
 
 As a sound source approaches the listener, a frequency-dependent filter, such as a high-pass filter, applied to the source signal is progressively opened: for example, the cutoff frequency decreases inversely with distance. At range, only high frequencies are present, giving the object a thin, distant quality. At close range, low frequencies are fully present, giving the object physical weight and presence. This models the perceptual reality that proximity reveals bass content that distance masks, and produces the sensation that an approaching object is gaining mass rather than merely gaining volume. The effect is implemented per source in the audio processing graph (for example via Web Audio API or any equivalent audio engine) and updated each frame from the 3D distance between source and listener position.
 
 Combined with Doppler shift and head-tracked panning, these three techniques form a unified spatial audio system in which a single moving sound source produces correlated changes across visual position, binaural pan, pitch, timbre, and spectral mass simultaneously, all derived from the same 3D scene state and face-tracking pipeline.
 
-## 8. Head-Coupled Aim Ray via Dual-Tracked Linear Regression
+### I.I. Head-Coupled Aim Ray via Dual-Tracked Regression
 
 In a head-coupled parallax scene, the apparent direction of a pointed finger changes as the viewer's head moves. Leaning right shifts the viewing angle, and a finger pointed at a fixed screen location now corresponds to a different point in 3D scene space. This system derives a continuous world-space aim ray from the geometric relationship between tracked head position and tracked fingertip position, such that the aim ray updates in real time as both head and hand move. The effect is analogous to physically looking down the barrel of a gun: the viewer leans to align their perspective, and the system tracks where they are actually aiming in the 3D scene, not merely where their finger points on the flat screen.
 
@@ -82,7 +82,7 @@ The regression output passes through a cascade of smoothing filters with tunable
 
 The calibration mechanic uses the same gesture and tracking pipeline that drives all other system interactions. No additional hardware, no separate calibration device, no page reload. The system calibrates itself using its own input modality, and the resulting aim ray is continuously updated from both head and hand position, producing a world-space interaction ray that responds to physical viewing angle the way a real aimed instrument would.
 
-## 9. WebGPU Compute Shader Inference
+### I.J. GPU Compute Shader Inference Pipeline
 
 Hand and face tracking ML models, such as BlazePalm, Hand Landmark, BlazeFace, and Face Landmark, are extracted in a portable model format (for example ONNX) and executed via a GPU compute shader backend (for example ONNX Runtime Web with WebGPU), eliminating synchronous CPU readback bottlenecks such as `glReadPixels` present in WebGL-based inference. This enables parallel multi-hand landmark inference in separate execution contexts, such as Web Workers, each with independent GPU device contexts.
 
@@ -90,51 +90,19 @@ As an example benchmark on a MacBook Pro M1 Max: hand tracking improves from ~47
 
 The WebGPU compute shader inference approach is implemented as a standalone open-source library: [webgpu-vision](https://github.com/Sonified/webgpu-vision).
 
-## 10. PReLU Decomposition for WebGPU Execution
-
-When a GPU-based ML runtime, such as ONNX Runtime Web's WebGPU execution provider, lacks a native kernel for a given operation, it falls back to CPU execution, pulling data off the GPU, computing on the CPU, and pushing it back. For example, in the face landmark model, the unsupported PReLU operation triggers this fallback dozens of times per frame (for example 69 times), introducing latency that breaks the perceptual coupling between physical head movement and visual response.
-
-The fix is a pre-deployment graph transformation: decompose the unsupported operation (for example PReLU) into a composition of GPU-native ops using an equivalent mathematical identity, such that the runtime never encounters the unsupported kernel. Zero roundtrips, zero accuracy loss, full inference speed recovered.
-
-This technique generalizes beyond any single operation and beyond any single model type. Any neural network model containing ops unsupported by a target runtime, including but not limited to ONNX models on WebGPU, can potentially be unblocked by expressing those ops as compositions of supported primitives. For browser-based ML and other environments where runtime op coverage lags behind native frameworks, this is a practical path to deploying models that would otherwise be GPU-unusable, keeping the entire inference pipeline on the GPU and preserving the perceptual coherence the system depends on.
-
-## 11. GPU-Side Letterbox + Affine Warp Between Detection Stages
+### I.K. GPU-Side Preprocessing Between Detection Stages
 
 In a GPU-accelerated vision pipeline (for example using WebGPU compute shaders), preprocessing steps including but not limited to letterbox padding and affine warping are performed on the GPU between detection stages such as palm detection and landmark inference, keeping image data on GPU with zero CPU readback between stages. Standard browser vision pipelines typically bounce through Canvas or similar CPU-accessible surfaces for preprocessing. Performing these transforms on the GPU eliminates the CPU-GPU-CPU roundtrip that typically dominates preprocessing latency in multi-stage detection pipelines.
 
-## 12. Weighted Non-Maximum Suppression
+### I.L. Weighted Non-Maximum Suppression
 
 Overlapping detections are combined using a weighted averaging approach, for example averaged by confidence score, rather than simply keeping the highest-scoring box. This produces smoother bounding boxes, especially at frame edges where detection confidence drops off. The weighted average preserves spatial information from multiple overlapping proposals rather than discarding all but one.
 
-## 13. Compact Networked Player State via Face Blendshapes + Head Pose
+### I.M. Compact Networked Player State via Face Blendshapes and Head Pose
 
 The face landmark pipeline produces a set of blendshape coefficients (for example 52 ARKit-compatible coefficients such as eyeBlinkLeft, mouthSmileLeft, browOuterUpRight, jawOpen, among others) via a dedicated blendshape inference worker running in parallel with the landmark worker. Combined with head position (for example 3 floats) and head rotation derived from landmarks (for example pitch, yaw, roll as 3 floats), the complete facial expression and head pose state can be as compact as approximately 232 bytes per frame. At 30fps this is approximately 7KB/sec over a real-time transport channel such as a WebRTC data channel, WebSocket, or other low-latency protocol, sufficient to drive full avatar facial animation on a remote client. For comparison, a voice call uses more bandwidth. The blendshape worker runs fire-and-forget with one frame of latency, adding zero fps overhead to the tracking pipeline.
 
-## 14. Atomic Float Gradient Accumulation on WebGPU
-
-GPU-based gesture training uses an atomic accumulation technique, such as a compare-and-swap loop (for example emulated `atomicAddF32`), to accumulate gradients from all samples in parallel into a single weight-sized buffer. Standard GPU training allocates per-sample gradient arrays and then reduces. This approach is O(weights) memory instead of O(samples x weights). This enables in-browser neural network training on GPU compute (for example via WebGPU) with minimal memory overhead, making real-time on-device gesture model training practical in a browser tab or comparable client-side runtime.
-
-## 15. Derived Geometric Feature Classification for In-Game Gesture Triggers
-
-Hand landmark coordinates from a single RGB camera may be transformed into a computed geometric feature vector prior to classification. The feature vector combines multiple orthogonal feature families, including but not limited to: inter-fingertip contact distances (for example 10 features from all pairwise fingertip combinations), thumb-to-joint distances for relative finger positioning (for example 12 features), per-joint flexion angles measuring curl at each knuckle (for example 15 features), inter-finger spread angles (for example 4 features), palm openness as a scalar (for example 1 feature), and camera-relative palm orientation angles (for example 3 features). Shape features are normalized by palm size for scale invariance and computed relative to the hand's own geometry for rotation invariance, while orientation features preserve camera-relative direction to distinguish poses that differ only in palm facing direction, such as poses as subtle as ASL signs U and H, or P and K.
-
-The resulting feature vector (for example 45 features in one configuration) serves as input to a classifier, such as a multilayer perceptron or other suitable model, trained to map specific hand poses to discrete in-game trigger events, including for example casting a spell, activating an ability, or selecting an action. The classifier is trained entirely in-browser on the user's own device, using captured samples of the user performing each target gesture. Training may be accelerated on the GPU via compute shaders (for example WebGPU), using atomic accumulation techniques such as compare-and-swap loops to emulate float atomic addition for parallel gradient accumulation across all training samples into a single weight-sized buffer. No server, no pre-trained gesture model, no depth sensor, and no specialized hardware are required.
-
-The result is a system in which a player can define, train, and deploy custom gesture triggers within a single browser session, with the trained classifier operating at interactive frame rates from a standard webcam. The combination of in-browser GPU-accelerated training, derived geometric features from orthogonal feature families, and real-time classification into game action triggers represents a novel pipeline for personalizable gesture-driven interaction.
-
-## 16. ML Recognition Confidence as a Real-Time Visible Gameplay Variable
-
-In gesture-driven interactive systems where hand pose recognition is performed by an ML model or other classification system, the raw or derived recognition confidence score may be exposed to the player as a continuous, real-time visible gameplay variable rather than consumed silently as a binary accept/reject threshold. For example, spell intensity, particle density, shield strength, or other in-game quantities may scale continuously with the model's confidence in the currently detected gesture. The player sees the confidence signal rendered as a live game-state variable and can adjust their gesture form in real time in response to visible feedback, creating a closed-loop skill acquisition system driven directly by the ML model's output.
-
-This is distinct from binary gesture acceptance (where confidence is consumed internally and the player sees only "recognized" or "not recognized") and distinct from post-hoc scoring (where input quality is evaluated after the fact, as in rhythm games). Here, the confidence signal is continuous, visible, and actionable in real time during the gesture itself. A gesture performed with degraded form does not simply fail; it produces a visibly degraded in-game effect, such as a fizzled spell or scattered particles, that communicates what "better" looks like. The same confidence signal that the model uses internally becomes the player's primary feedback channel.
-
-In traditional game design, spell failure or degraded ability outcomes are typically governed by random number generation: dice rolls, percentage chances, or pseudorandom draws that the player cannot directly influence through physical skill. This system replaces that RNG-driven failure model with ML model confidence as the governing variable. A spell fizzles not because a random number fell below a threshold, but because the model's confidence in the detected gesture was low, which in turn reflects the physical clarity of the player's hand pose, lighting conditions, occlusion, or distance from the camera. Crucially, unlike a dice roll, this source of variance is *learnable*: a player can practice gesture form, adjust hand position, or improve lighting to increase model confidence, converting what would traditionally be opaque randomness into a trainable physical skill. Model limitations such as landmark dropout at frame edges, reduced confidence for occluded fingers, or sensitivity to hand orientation become the equivalent of environmental gameplay factors that a skilled player learns to manage. The limitations of the ML model become the physics of the game world.
-
-This design principle extends to gesture vocabulary selection: core mechanics, including but not limited to high-frequency interactions such as blocking, charging, and releasing, may be intentionally mapped to hand poses that maximize ML model confidence. For example, an open palm facing the camera produces maximum landmark spread and highest tracking reliability in monocular webcam-based systems. More generally, any gesture vocabulary may be designed around the confidence topology of its underlying recognition model, such that model strengths become gameplay advantages and model limitations become legible feedback rather than invisible bugs. A player whose hand drifts out of optimal tracking pose experiences a proportionally degraded game state that teaches correct form, not a software failure with no explanation.
-
-The result is an interaction system co-designed with the confidence characteristics of its underlying recognition model, where the gesture vocabulary, the gameplay mechanics, and the real-time skill acquisition feedback are expressions of the same underlying signal. This principle applies to any recognition modality, including but not limited to hand pose, body pose, facial expression, or voice command recognition systems. While prior systems such as rhythm games have used input quality as a post-hoc scoring mechanism, the continuous real-time exposure of ML recognition confidence as a visible, player-actionable gameplay variable in a vision-based gesture system is believed to be novel as of the date of this publication.
-
-## 17. Real-Time Facial Animation with Geometry-Driven Lip Synchronization
+### I.N. Real-Time Facial Animation with Geometry-Driven Lip Synchronization
 
 A dedicated blendshape inference model running on a selected subset of face landmarks (for example 146 landmarks) produces a set of blendshape coefficients compatible with a standard blendshape convention (for example 52 ARKit-compatible coefficients) at the tracking frame rate. These coefficients drive morph target deformation on any 3D character mesh rigged with the corresponding blendshape targets, enabling real-time facial puppeting of stylized avatars from webcam input alone.
 
@@ -146,27 +114,15 @@ The combination of geometry-driven facial animation, voice-corroborated lip sync
 
 The geometry-driven approach is a key differentiator from existing VTubing and avatar animation software, which typically drives jawOpen or equivalent mouth parameters from audio amplitude alone. This system derives multiple distinct mouth blendshape coefficients (for example 12 or more) from real facial geometry, capturing lip shape, jaw position, and mouth configuration independently of whether the user is speaking.
 
-## 18. Integer GPU Compute as Deterministic Multiplayer Simulation Substrate
-
-The game interaction model is not projectile exchange but competing field systems: two or more players summon extended phenomena, such as a high-pressure fire front meeting an ice storm, that collide and interact at their boundaries. Outcomes are not scripted but emerge from a small integer rule set governing elements including but not limited to gravitational attraction, momentum, spin, and material interaction. As with cellular automata such as Conway's Game of Life, where a small number of rules produce complex emergent structures, a small number of local interaction rules operating on a large grid can generate complex large-scale behavior that no player explicitly authored. Players continuously shape the evolution of their systems in real time, making the simulation a co-creative medium rather than a fire-and-forget combat model.
-
-The substrate for this emergent interaction is a parallelized deterministic integer compute simulation running on GPU compute shaders (for example WebGPU, or any equivalent GPU compute API), serving as the authoritative game state for peer-to-peer multiplayer in a client-side runtime such as a browser. Integer-only arithmetic (including but not limited to u8, u16, u32, or other fixed-width integer types) guarantees bit-identical output across all hardware. Deterministic systems such as cellular automata are natural fits for this substrate. For example, a 3D cellular automaton operating on a voxel grid (for example up to 128x64x256 cells or other grid dimensions), each cell storing packed integer state (for example 32 bytes), where every active cell reads its neighbors (for example 26 in a Moore neighborhood, or 6 in a von Neumann neighborhood, or other stencil configurations) and computes its next state from integer logic alone. No floating point. No rounding ambiguity. No hardware-dependent divergence.
-
-Because the simulation is deterministic, two or more machines receiving the same inputs produce identical state without exchanging simulation data. Game entities such as spells or other interactive objects are transmitted as compact recipes (for example approximately 30 bytes) rather than cell-by-cell state. All machines expand the recipe identically using a shared deterministic PRNG seed or equivalent deterministic expansion method. This can reduce per-entity network cost by an order of magnitude or more (for example approximately 40x in one configuration). A complementary two-layer architecture separates the integer simulation layer from a rendering layer that may use float-precision or other visual representations: the integer state is the authoritative truth, synced and deterministic; the rendering is local and may diverge freely between machines without affecting game outcome.
-
-Sparse compute dispatch further reduces cost: an active cell list or equivalent sparse data structure maintains only occupied cells and their neighbor halos, reducing GPU thread dispatch from the full grid volume to only the active region. A secondary field layer, such as a gravitational field at full or reduced simulation resolution, may store net force vectors or other aggregate quantities per cell, providing long-range structure and coherence that local neighbor stencils alone cannot propagate fast enough to supply.
-
-The determinism of the integer simulation enables rollback-based netcode models such as GGPO: each machine runs speculatively with predicted opponent input, and on mismatch rewinds to the last confirmed state and re-simulates forward. The integer simulation is efficient enough on GPU compute to re-run multiple frames (for example 3-5 frames) in a single tick without dropping below interactive frame rates. No authoritative server is required. The entire multiplayer simulation may run peer-to-peer over low-latency transport channels such as WebRTC data channels, WebSocket, or other real-time protocols, at bandwidths on the order of kilobytes per second (for example approximately 5.9 KB/sec in one configuration). The specific combination of deterministic integer GPU compute as a simulation substrate, compact recipe-based state sync, and rollback netcode running entirely in a client-side runtime represents a novel multiplayer architecture.
-
-## 19. Mobile Device as Webcam-Equivalent Platform for On-Device Gesture Interaction and AR
+### I.O. Mobile Device as Platform
 
 The GPU-accelerated inference pipeline, gesture classification system, and deterministic simulation architecture described in this document are not limited to desktop or laptop environments. Mobile devices with front-facing cameras and GPU compute capability (for example via WebGPU, Metal, or other mobile GPU APIs) may serve as equivalent platforms for the entire system. The front-facing camera of a mobile device provides the same single RGB input that drives head-coupled parallax, face tracking, and hand landmark detection on desktop.
 
-When the device is held in one hand, the user's free hand is available for single-hand gesture input, including the gesture classification and confidence-driven gameplay mechanics described in sections 15 and 16. The device screen serves as the parallax window, with head-coupled perspective shift driven by the front-facing camera's view of the user's face, and the free hand interacting in the 3D scene via the same landmark detection and feature classification pipeline.
+When the device is held in one hand, the user's free hand is available for single-hand gesture input, including the gesture classification and confidence-driven gameplay mechanics described in Claims I and III. The device screen serves as the parallax window, with head-coupled perspective shift driven by the front-facing camera's view of the user's face, and the free hand interacting in the 3D scene via the same landmark detection and feature classification pipeline.
 
 When the device is placed on a stand, tripod, or other stable surface, both of the user's hands are freed for bilateral gesture input, enabling the full two-hand interaction model including dual-hand spell casting, blocking, and other gestures that require simultaneous use of both hands. The transition between one-hand and two-hand interaction modes may be automatic, driven by the hand detection pipeline's count of visible hands.
 
-Multiple devices operating in a shared physical space may enable co-located multiplayer configurations. For example, two players facing each other across a table, each with a device on a stand, can engage in head-to-head gameplay where each device tracks its respective player's face and hands while running the deterministic simulation described in section 18. The peer-to-peer sync architecture requires only a low-bandwidth data channel between devices, which may operate over local network, Bluetooth, or any available transport.
+Multiple devices operating in a shared physical space may enable co-located multiplayer configurations. For example, two players facing each other across a table, each with a device on a stand, can engage in head-to-head gameplay where each device tracks its respective player's face and hands while running the deterministic simulation described in Claim IV. The peer-to-peer sync architecture requires only a low-bandwidth data channel between devices, which may operate over local network, Bluetooth, or any available transport.
 
 The rear-facing camera of a mobile device may additionally serve as an AR viewport: the camera feed captures the physical environment while the system composites game content, such as spell effects, particle systems, or other interactive elements, over the real-world view. Combined with head-coupled parallax from the front-facing camera (or device orientation sensors), the rendered content may be spatially registered to the physical space, producing an augmented reality experience from a standard mobile device without requiring dedicated AR hardware, AR frameworks, or platform-specific AR APIs. The same GPU compute pipeline that drives gesture recognition and deterministic simulation renders the composited AR output.
 
@@ -174,6 +130,72 @@ The result is that the complete system, including head tracking, hand gesture cl
 
 ---
 
-## License
+## Claim II. Op Decomposition for GPU Runtime Compatibility
 
-MIT License. See [LICENSE](LICENSE).
+When a GPU-based ML runtime lacks a native kernel for a given operation, the runtime falls back to CPU execution, pulling data off the GPU, computing on the CPU, and pushing it back. This disclosure describes a pre-deployment graph transformation that decomposes unsupported operations into compositions of GPU-native ops using equivalent mathematical identities, such that the runtime never encounters the unsupported kernel. The result is zero CPU-GPU roundtrips, zero accuracy loss, and full GPU inference speed recovered.
+
+This technique applies to any neural network model containing ops unsupported by a target runtime, including but not limited to ONNX models on WebGPU, and is not limited to any single operation or model type. Any unsupported op that can be expressed as a mathematically equivalent composition of supported primitives may be decomposed in this manner. For browser-based ML and other environments where runtime op coverage lags behind native frameworks, this is a practical path to deploying models that would otherwise be GPU-unusable, keeping the entire inference pipeline on the GPU.
+
+### II.A. PReLU Decomposition for WebGPU Execution
+
+As a specific application, ONNX Runtime Web's WebGPU execution provider lacks a native PReLU kernel. For example, in a face landmark model, the unsupported PReLU operation triggers CPU fallback dozens of times per frame (for example 69 times), introducing latency that breaks the perceptual coupling between physical head movement and visual response in real-time vision applications.
+
+Decomposing PReLU into a composition of GPU-native ops using an equivalent mathematical identity eliminates all CPU roundtrips for this operation, recovering full inference speed. This specific decomposition demonstrates the general principle of Claim II applied to a concrete op and runtime.
+
+---
+
+## Claim III. Client-Side Personalizable Gesture Intelligence
+
+A system for on-device gesture classification in which a user can define, train, and deploy custom gesture recognition models entirely within a client-side runtime such as a browser, with no server, no pre-trained gesture model, no depth sensor, and no specialized hardware required. The system encompasses three integrated capabilities: derived geometric feature extraction from hand landmarks, GPU-accelerated on-device model training, and real-time classification into interactive trigger events at interactive frame rates from a standard webcam.
+
+### III.A. Derived Geometric Feature Families
+
+Hand landmark coordinates from a single RGB camera may be transformed into a computed geometric feature vector prior to classification. The feature vector combines multiple orthogonal feature families, including but not limited to: inter-fingertip contact distances (for example 10 features from all pairwise fingertip combinations), thumb-to-joint distances for relative finger positioning (for example 12 features), per-joint flexion angles measuring curl at each knuckle (for example 15 features), inter-finger spread angles (for example 4 features), palm openness as a scalar (for example 1 feature), and camera-relative palm orientation angles (for example 3 features). Shape features are normalized by palm size for scale invariance and computed relative to the hand's own geometry for rotation invariance, while orientation features preserve camera-relative direction to distinguish poses that differ only in palm facing direction, such as poses as subtle as ASL signs U and H, or P and K.
+
+The resulting feature vector (for example 45 features in one configuration) serves as input to a classifier, such as a multilayer perceptron or other suitable model, trained to map specific hand poses to discrete trigger events, including for example casting a spell, activating an ability, or selecting an action. The classifier is trained entirely in-browser on the user's own device, using captured samples of the user performing each target gesture.
+
+### III.B. Atomic Float Gradient Accumulation for On-Device GPU Training
+
+GPU-based gesture training uses an atomic accumulation technique, such as a compare-and-swap loop (for example emulated `atomicAddF32`), to accumulate gradients from all samples in parallel into a single weight-sized buffer. Standard GPU training allocates per-sample gradient arrays and then reduces. This approach is O(weights) memory instead of O(samples x weights). This enables in-browser neural network training on GPU compute (for example via WebGPU) with minimal memory overhead, making real-time on-device gesture model training practical in a browser tab or comparable client-side runtime.
+
+### III.C. ML Recognition Confidence as a Real-Time Visible Gameplay Variable
+
+In gesture-driven interactive systems where hand pose recognition is performed by an ML model or other classification system, the raw or derived recognition confidence score may be exposed to the player as a continuous, real-time visible gameplay variable rather than consumed silently as a binary accept/reject threshold. For example, spell intensity, particle density, shield strength, or other in-game quantities may scale continuously with the model's confidence in the currently detected gesture. The player sees the confidence signal rendered as a live game-state variable and can adjust their gesture form in real time in response to visible feedback, creating a closed-loop skill acquisition system driven directly by the ML model's output.
+
+This is distinct from binary gesture acceptance (where confidence is consumed internally and the player sees only "recognized" or "not recognized") and distinct from post-hoc scoring (where input quality is evaluated after the fact, as in rhythm games). Here, the confidence signal is continuous, visible, and actionable in real time during the gesture itself. A gesture performed with degraded form does not simply fail; it produces a visibly degraded in-game effect, such as a fizzled spell or scattered particles, that communicates what "better" looks like. The same confidence signal that the model uses internally becomes the player's primary feedback channel.
+
+In traditional game design, spell failure or degraded ability outcomes are typically governed by random number generation: dice rolls, percentage chances, or pseudorandom draws that the player cannot directly influence through physical skill. This system replaces that RNG-driven failure model with ML model confidence as the governing variable. A spell fizzles not because a random number fell below a threshold, but because the model's confidence in the detected gesture was low, which in turn reflects the physical clarity of the player's hand pose, lighting conditions, occlusion, or distance from the camera. Crucially, unlike a dice roll, this source of variance is *learnable*: a player can practice gesture form, adjust hand position, or improve lighting to increase model confidence, converting what would traditionally be opaque randomness into a trainable physical skill. Model limitations such as landmark dropout at frame edges, reduced confidence for occluded fingers, or sensitivity to hand orientation become the equivalent of environmental gameplay factors that a skilled player learns to manage. The limitations of the ML model become the physics of the game world.
+
+This design principle extends to gesture vocabulary selection: core mechanics, including but not limited to high-frequency interactions such as blocking, charging, and releasing, may be intentionally mapped to hand poses that maximize ML model confidence. For example, an open palm facing the camera produces maximum landmark spread and highest tracking reliability in monocular webcam-based systems. More generally, any gesture vocabulary may be designed around the confidence topology of its underlying recognition model, such that model strengths become gameplay advantages and model limitations become legible feedback rather than invisible bugs. A player whose hand drifts out of optimal tracking pose experiences a proportionally degraded game state that teaches correct form, not a software failure with no explanation.
+
+The result is an interaction system co-designed with the confidence characteristics of its underlying recognition model, where the gesture vocabulary, the gameplay mechanics, and the real-time skill acquisition feedback are expressions of the same underlying signal. This principle applies to any recognition modality, including but not limited to hand pose, body pose, facial expression, or voice command recognition systems. While prior systems such as rhythm games have used input quality as a post-hoc scoring mechanism, the continuous real-time exposure of ML recognition confidence as a visible, player-actionable gameplay variable in a vision-based gesture system is believed to be novel as of the date of this publication.
+
+---
+
+## Claim IV. Deterministic Integer GPU Compute as Serverless Peer-to-Peer Multiplayer Substrate
+
+A parallelized deterministic integer compute simulation running on GPU compute shaders (for example WebGPU, or any equivalent GPU compute API), serving as the authoritative game state for peer-to-peer multiplayer in a client-side runtime such as a browser. Integer-only arithmetic (including but not limited to u8, u16, u32, or other fixed-width integer types) guarantees bit-identical output across all hardware. No floating point. No rounding ambiguity. No hardware-dependent divergence. No authoritative server is required. The specific combination of deterministic integer GPU compute as a simulation substrate, compact recipe-based state sync, and rollback netcode running entirely in a client-side runtime represents a novel multiplayer architecture.
+
+The game interaction model is not projectile exchange but competing field systems: two or more players summon extended phenomena, such as a high-pressure fire front meeting an ice storm, that collide and interact at their boundaries. Outcomes are not scripted but emerge from a small integer rule set governing elements including but not limited to gravitational attraction, momentum, spin, and material interaction. As with cellular automata such as Conway's Game of Life, where a small number of rules produce complex emergent structures, a small number of local interaction rules operating on a large grid can generate complex large-scale behavior that no player explicitly authored. Players continuously shape the evolution of their systems in real time, making the simulation a co-creative medium rather than a fire-and-forget combat model.
+
+Deterministic systems such as cellular automata are natural fits for this substrate. For example, a 3D cellular automaton operating on a voxel grid (for example up to 128x64x256 cells or other grid dimensions), each cell storing packed integer state (for example 32 bytes), where every active cell reads its neighbors (for example 26 in a Moore neighborhood, or 6 in a von Neumann neighborhood, or other stencil configurations) and computes its next state from integer logic alone.
+
+### IV.A. Recipe-Based State Sync
+
+Because the simulation is deterministic, two or more machines receiving the same inputs produce identical state without exchanging simulation data. Game entities such as spells or other interactive objects are transmitted as compact recipes (for example approximately 30 bytes) rather than cell-by-cell state. All machines expand the recipe identically using a shared deterministic PRNG seed or equivalent deterministic expansion method. This can reduce per-entity network cost by an order of magnitude or more (for example approximately 40x in one configuration). The entire multiplayer simulation may run peer-to-peer over low-latency transport channels such as WebRTC data channels, WebSocket, or other real-time protocols, at bandwidths on the order of kilobytes per second (for example approximately 5.9 KB/sec in one configuration).
+
+### IV.B. Two-Layer Simulation and Rendering Architecture
+
+A complementary two-layer architecture separates the integer simulation layer from a rendering layer that may use float-precision or other visual representations: the integer state is the authoritative truth, synced and deterministic; the rendering is local and may diverge freely between machines without affecting game outcome.
+
+### IV.C. Sparse Compute Dispatch
+
+An active cell list or equivalent sparse data structure maintains only occupied cells and their neighbor halos, reducing GPU thread dispatch from the full grid volume to only the active region. A secondary field layer, such as a gravitational field at full or reduced simulation resolution, may store net force vectors or other aggregate quantities per cell, providing long-range structure and coherence that local neighbor stencils alone cannot propagate fast enough to supply.
+
+### IV.D. Rollback Netcode on GPU Compute
+
+The determinism of the integer simulation enables rollback-based netcode models such as GGPO: each machine runs speculatively with predicted opponent input, and on mismatch rewinds to the last confirmed state and re-simulates forward. The integer simulation is efficient enough on GPU compute to re-run multiple frames (for example 3-5 frames) in a single tick without dropping below interactive frame rates.
+
+---
+
+The source code in this repository is released under the MIT License. This document is a public technical disclosure establishing prior art; it is not a license grant for any patent claims.
