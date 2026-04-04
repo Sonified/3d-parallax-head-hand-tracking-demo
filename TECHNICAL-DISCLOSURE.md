@@ -82,27 +82,11 @@ The regression output passes through a cascade of smoothing filters with tunable
 
 The calibration mechanic uses the same gesture and tracking pipeline that drives all other system interactions. No additional hardware, no separate calibration device, no page reload. The system calibrates itself using its own input modality, and the resulting aim ray is continuously updated from both head and hand position, producing a world-space interaction ray that responds to physical viewing angle the way a real aimed instrument would.
 
-### I.J. GPU Compute Shader Inference Pipeline
-
-Hand and face tracking ML models, such as BlazePalm, Hand Landmark, BlazeFace, and Face Landmark, are extracted in a portable model format (for example ONNX) and executed via a GPU compute shader backend (for example ONNX Runtime Web with WebGPU), eliminating synchronous CPU readback bottlenecks such as `glReadPixels` present in WebGL-based inference. This enables parallel multi-hand landmark inference in separate execution contexts, such as Web Workers, each with independent GPU device contexts.
-
-As an example benchmark on a MacBook Pro M1 Max: hand tracking improves from ~47fps (MediaPipe) to ~72fps (WebGPU), face tracking from ~55fps to ~77fps, with zero CPU readback during preprocessing (GPU-side letterbox and affine warp between detection and landmark stages, for example via `Tensor.fromGpuBuffer` or equivalent GPU buffer passing). In this configuration, only approximately 252 bytes per hand and 5.7KB per face cross the GPU-CPU boundary per frame. The specific bandwidth reduction will vary by model and hardware, but the principle of minimizing cross-boundary data transfer applies generally.
-
-The WebGPU compute shader inference approach is implemented as a standalone open-source library: [webgpu-vision](https://github.com/Sonified/webgpu-vision).
-
-### I.K. GPU-Side Preprocessing Between Detection Stages
-
-In a GPU-accelerated vision pipeline (for example using WebGPU compute shaders), preprocessing steps including but not limited to letterbox padding and affine warping are performed on the GPU between detection stages such as palm detection and landmark inference, keeping image data on GPU with zero CPU readback between stages. Standard browser vision pipelines typically bounce through Canvas or similar CPU-accessible surfaces for preprocessing. Performing these transforms on the GPU eliminates the CPU-GPU-CPU roundtrip that typically dominates preprocessing latency in multi-stage detection pipelines.
-
-### I.L. Weighted Non-Maximum Suppression
-
-Overlapping detections are combined using a weighted averaging approach, for example averaged by confidence score, rather than simply keeping the highest-scoring box. This produces smoother bounding boxes, especially at frame edges where detection confidence drops off. The weighted average preserves spatial information from multiple overlapping proposals rather than discarding all but one.
-
-### I.M. Compact Networked Player State via Face Blendshapes and Head Pose
+### I.J. Compact Networked Player State via Face Blendshapes and Head Pose
 
 The face landmark pipeline produces a set of blendshape coefficients (for example 52 ARKit-compatible coefficients such as eyeBlinkLeft, mouthSmileLeft, browOuterUpRight, jawOpen, among others) via a dedicated blendshape inference worker running in parallel with the landmark worker. Combined with head position (for example 3 floats) and head rotation derived from landmarks (for example pitch, yaw, roll as 3 floats), the complete facial expression and head pose state can be as compact as approximately 232 bytes per frame. At 30fps this is approximately 7KB/sec over a real-time transport channel such as a WebRTC data channel, WebSocket, or other low-latency protocol, sufficient to drive full avatar facial animation on a remote client. For comparison, a voice call uses more bandwidth. The blendshape worker runs fire-and-forget with one frame of latency, adding zero fps overhead to the tracking pipeline.
 
-### I.N. Real-Time Facial Animation with Geometry-Driven Lip Synchronization
+### I.K. Real-Time Facial Animation with Geometry-Driven Lip Synchronization
 
 A dedicated blendshape inference model running on a selected subset of face landmarks (for example 146 landmarks) produces a set of blendshape coefficients compatible with a standard blendshape convention (for example 52 ARKit-compatible coefficients) at the tracking frame rate. These coefficients drive morph target deformation on any 3D character mesh rigged with the corresponding blendshape targets, enabling real-time facial puppeting of stylized avatars from webcam input alone.
 
@@ -114,7 +98,7 @@ The combination of geometry-driven facial animation, voice-corroborated lip sync
 
 The geometry-driven approach is a key differentiator from existing VTubing and avatar animation software, which typically drives jawOpen or equivalent mouth parameters from audio amplitude alone. This system derives multiple distinct mouth blendshape coefficients (for example 12 or more) from real facial geometry, capturing lip shape, jaw position, and mouth configuration independently of whether the user is speaking.
 
-### I.O. Mobile Device as Platform
+### I.L. Mobile Device as Platform
 
 The GPU-accelerated inference pipeline, gesture classification system, and deterministic simulation architecture described in this document are not limited to desktop or laptop environments. Mobile devices with front-facing cameras and GPU compute capability (for example via WebGPU, Metal, or other mobile GPU APIs) may serve as equivalent platforms for the entire system. The front-facing camera of a mobile device provides the same single RGB input that drives head-coupled parallax, face tracking, and hand landmark detection on desktop.
 
@@ -130,17 +114,33 @@ The result is that the complete system, including head tracking, hand gesture cl
 
 ---
 
-## Claim II. Op Decomposition for GPU Runtime Compatibility
+## Claim II. GPU-Resident ML Vision Pipeline for Real-Time Perceptual Applications
+
+Real-time vision-driven interaction systems, including but not limited to head-coupled parallax and gesture recognition, depend on maintaining inference latency below the threshold of perceptual coherence. When tracking latency exceeds this threshold, the coupling between physical movement and visual response breaks down, and the illusion of spatial presence collapses. Achieving sub-threshold latency in a client-side runtime such as a browser requires a complete pipeline in which ML inference, inter-stage preprocessing, and post-processing all remain GPU-resident, with minimal data crossing the GPU-CPU boundary.
+
+This disclosure describes such a pipeline: a system for deploying multi-stage ML vision models to GPU compute in a client-side runtime, encompassing model extraction from sealed upstream frameworks, conversion to a portable format (for example ONNX), execution via GPU compute shaders (for example WebGPU) in parallel off-thread execution contexts (for example Web Workers), GPU-resident preprocessing between detection stages, and minimized GPU-CPU data transfer limited to final inference outputs. The pipeline has been benchmarked at approximately 50% improvement in tracking speed over leading browser-based inference approaches (for example ~72fps vs ~47fps for hand tracking, ~77fps vs ~55fps for face tracking on equivalent hardware), achieving 120fps or higher composite tracking rates by virtue of non-blocking off-thread execution that leaves the main rendering thread free for smooth visual output.
+
+The pipeline is implemented as a standalone open-source library ([webgpu-vision](https://github.com/Sonified/webgpu-vision)) and applies to any multi-stage ML vision task deployable to GPU compute in a client-side runtime, including but not limited to hand tracking, face tracking, pose estimation, object detection, or other real-time vision applications.
+
+### II.A. Op Decomposition for GPU Runtime Compatibility
 
 When a GPU-based ML runtime lacks a native kernel for a given operation, the runtime falls back to CPU execution, pulling data off the GPU, computing on the CPU, and pushing it back. This disclosure describes a pre-deployment graph transformation that decomposes unsupported operations into compositions of GPU-native ops using equivalent mathematical identities, such that the runtime never encounters the unsupported kernel. The result is zero CPU-GPU roundtrips, zero accuracy loss, and full GPU inference speed recovered.
 
 This technique applies to any neural network model containing ops unsupported by a target runtime, including but not limited to ONNX models on WebGPU, and is not limited to any single operation or model type. Any unsupported op that can be expressed as a mathematically equivalent composition of supported primitives may be decomposed in this manner. For browser-based ML and other environments where runtime op coverage lags behind native frameworks, this is a practical path to deploying models that would otherwise be GPU-unusable, keeping the entire inference pipeline on the GPU.
 
-### II.A. PReLU Decomposition for WebGPU Execution
+### II.B. PReLU Decomposition for WebGPU Execution
 
-As a specific application, ONNX Runtime Web's WebGPU execution provider lacks a native PReLU kernel. For example, in a face landmark model, the unsupported PReLU operation triggers CPU fallback dozens of times per frame (for example 69 times), introducing latency that breaks the perceptual coupling between physical head movement and visual response in real-time vision applications.
+As a specific application of II.A, ONNX Runtime Web's WebGPU execution provider lacks a native PReLU kernel. For example, in a face landmark model, the unsupported PReLU operation triggers CPU fallback dozens of times per frame (for example 69 times), introducing latency that breaks perceptual coherence in real-time vision applications.
 
-Decomposing PReLU into a composition of GPU-native ops using an equivalent mathematical identity eliminates all CPU roundtrips for this operation, recovering full inference speed. This specific decomposition demonstrates the general principle of Claim II applied to a concrete op and runtime.
+Decomposing PReLU into a composition of GPU-native ops using an equivalent mathematical identity eliminates all CPU roundtrips for this operation, recovering full inference speed.
+
+### II.C. GPU-Side Preprocessing Between Detection Stages
+
+In a GPU-accelerated vision pipeline (for example using WebGPU compute shaders), preprocessing steps including but not limited to letterbox padding and affine warping are performed on the GPU between detection stages such as palm detection and landmark inference, keeping image data on GPU with zero CPU readback between stages. Standard browser vision pipelines typically bounce through Canvas or similar CPU-accessible surfaces for preprocessing. Performing these transforms on the GPU eliminates the CPU-GPU-CPU roundtrip that typically dominates preprocessing latency in multi-stage detection pipelines.
+
+### II.D. Weighted Non-Maximum Suppression
+
+Overlapping detections are combined using a weighted averaging approach, for example averaged by confidence score, rather than simply keeping the highest-scoring box. This produces smoother bounding boxes, especially at frame edges where detection confidence drops off. The weighted average preserves spatial information from multiple overlapping proposals rather than discarding all but one.
 
 ---
 
