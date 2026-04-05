@@ -236,6 +236,14 @@ More generally, this technique may apply to any pair of GPU operations where one
 
 Kernel fusion does not apply uniformly. Operations that are both ALU-bound (for example ML inference layers, which achieve high arithmetic intensity) do not benefit because there are no memory stall gaps to fill. The appropriate architectural strategy may vary by workload: kernel fusion for complementary stall patterns, Web Worker parallelism for CPU-side concurrency (as described in Claim II), or sequential execution where data dependencies require it. As of the date of this disclosure, this is the first documented application of complementary kernel fusion as a workaround for WebGPU's lack of async compute.
 
+### II.G. Multi-Device GPU Overlap via Separate Adapter Handles
+
+WebGPU's device model consumes the adapter handle on first device creation, preventing multiple devices from sharing a single adapter. By requesting separate adapters via multiple calls to navigator.gpu.requestAdapter() and creating independent GPU devices from each, the system may achieve measurable GPU work overlap when the workloads target different GPU functional units. For example, a texture-sampling workload on one device and a memory-copy workload on another device may overlap via the hardware's wavefront scheduler because they contend for different resources.
+
+Benchmarked on identical hardware (Apple M1, Chrome, WebGPU, 2026-04-04): compute + compute workloads targeting the same functional unit achieved 1.01x overlap (no benefit, as expected). Texture + DMA workloads across two devices achieved 1.35x. Three devices across three workers achieved 1.53x. DMA + memory workloads achieved 1.64x mean with 1.98x peak. The overlap is workload-dependent and scales with functional unit diversity, not device count alone.
+
+This technique complements the kernel fusion approach of II.F: fusion is preferred when workloads have complementary stall patterns within a single dispatch, while multi-device overlap may be preferred when workloads are independently schedulable and target different GPU functional units. Both techniques work within WebGPU's serial dispatch constraint.
+
 ---
 
 ## Claim III. In-Browser GPU-Accelerated Gesture Model Training and Real-Time Deployment
@@ -310,6 +318,26 @@ The active cell set may simultaneously serve as both the compute dispatch struct
 ### IV.E. Rollback Netcode on GPU Compute
 
 The determinism of the integer simulation enables rollback-based netcode models such as GGPO: each machine runs speculatively with predicted opponent input, and on mismatch rewinds to the last confirmed state and re-simulates forward. The integer simulation is efficient enough on GPU compute to re-run multiple frames (for example 3-5 frames) in a single tick without dropping below interactive frame rates.
+
+### IV.F. Packed Cell Layout with Gravity and Behavior Lookup Table
+
+Each cell in the simulation grid may store its complete state in a compact packed integer format (for example 32 bytes per cell, with 16 bytes per player). The cell state may include element counts for multiple element types (for example 7), momentum vectors, gravitational force vectors, and a behavior index, all packed as integer fields with no floating-point values. Gravitational force vectors may be packed into the cell alongside element state rather than stored in a separate GPU buffer, reducing memory usage (for example by 11-13%) and enabling the kernel fusion described in II.F: the CA state transition and gravitational gradient computation may share the same neighbor traversal because both read from and write to the same cell structure.
+
+The behavior index (for example a single byte supporting up to 256 types) may index into a compact behavior lookup table (for example 32 bytes per entry, 8KB total for 256 types) that defines the behavioral parameters governing how that cell's contents propagate, reproduce, interact, and decay. The lookup table may encode parameters including but not limited to: propagation rules (for example a Wolfram CA rule number or other transition function), reproduction behavior (spawn rate, threshold, child type), lifecycle parameters (fuse timer, phase shifting, decay rate), combat interactions (element drain, contagion, combo triggers), movement characteristics (surface affinity, wall behavior, jitter amplitude), and visual properties (stealth, brightness curve). The behavior of any game entity is fully defined by its LUT entry; no per-entity code, scripts, or object instances are required.
+
+### IV.G. Entity-Free Interaction via Substrate Evolution
+
+In traditional game architectures, interactive entities such as spells, projectiles, or creatures are explicitly instantiated objects with properties (for example health points, position, velocity, lifetime) managed by game logic. Each entity is allocated, updated per frame, checked for collisions, and eventually garbage collected. This system eliminates the entity abstraction entirely. No entity objects exist. No entity allocation, no garbage collection, no collision detection system, no per-entity update loop.
+
+Instead, game entities may be seeded as initial conditions: element counts, momentum, gravity, and a behavior index written to cells on the input face of the simulation grid. The CA substrate evolves them according to the behavior LUT (IV.F). What the player perceives as a "fireball" or "ice wall" or "hive" is an emergent structure, a region of cells whose behavior LUT entries produce coherent collective motion, not a managed object with an identity.
+
+Multi-generational entity chains (for example a hive that spawns drones, or a spore cloud that spawns spores that become tendrils) may emerge from the spawn_type field in the behavior LUT alone, with no spawning system, no entity manager, and no parent-child relationships in code. The GPU processes cells, not entities. One fused compute dispatch (II.F) handles all game interactions simultaneously because they are all cells following LUT rules.
+
+Entity survivability is likewise emergent rather than stored. No health field exists. A region of dense element concentration (for example 200 fire particles) survives longer because decay takes more ticks to reach zero. A thin region (for example 5 particles) dies in a few ticks. A gravity core (IV.C) maintains concentration by pulling mass together. The visual representation of an entity's state, its size, brightness, and particle density, is a direct readout of its element concentration, not a rendering of a separate health variable. The player sees who is winning by watching the mass, not by reading a health bar.
+
+### IV.H. Deterministic Positional PRNG for Visual Randomness
+
+Cell behaviors that require apparent randomness (for example jitter, random walk, or stochastic decay) may use a deterministic pseudorandom number generator seeded from the cell's grid position and the current simulation tick count (for example via xorshift32 or other integer PRNG). Because the seed is derived entirely from values that are identical on all machines (grid position is structural, tick count is synchronized), the PRNG output is bit-identical across all participating machines without transmitting or synchronizing any random state over the network. Each cell independently computes its own "randomness" and all machines agree on the result. This provides visually random behavior (particles jitter, decay varies, spawn timing fluctuates) while maintaining the strict determinism required by the multiplayer architecture of Claim IV and the rollback netcode of IV.E.
 
 ---
 
