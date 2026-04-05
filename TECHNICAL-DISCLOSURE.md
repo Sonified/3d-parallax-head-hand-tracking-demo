@@ -281,7 +281,7 @@ Two independent machines may each simulate a complete emergent physics world and
 
 Multiplayer simulation requiring bit-identical state across all participating machines cannot tolerate floating-point arithmetic, which produces hardware-dependent rounding differences that compound across millions of cell updates and produce divergent game states within seconds. Integer-only arithmetic is therefore not a design preference but an architectural requirement for serverless deterministic multiplayer at scale.
 
-Deterministic systems such as cellular automata are natural fits for this substrate. For example, a 3D cellular automaton operating on a voxel grid (for example up to 128x64x256 cells or other grid dimensions), each cell storing packed integer state (for example 32 bytes), where every active cell reads its neighbors (for example 26 in a Moore neighborhood, or 6 in a von Neumann neighborhood, or other stencil configurations) and computes its next state from integer logic alone.
+Deterministic systems such as cellular automata are natural fits for this substrate. For example, a 3D cellular automaton operating on a voxel grid (for example up to 128x64x256 cells or other grid dimensions), each cell storing packed integer state (for example 32 bytes), where every active cell reads its neighbors (for example 26 in a Moore neighborhood, or 6 in a von Neumann neighborhood, or other stencil configurations) and computes its next state from integer logic alone. Grid dimensions may be quantized to multiples of the GPU workgroup size (for example multiples of 64) to ensure optimal thread occupancy and avoid wasted dispatch lanes.
 
 ### Prior art context
 
