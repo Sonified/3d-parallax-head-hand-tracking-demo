@@ -293,7 +293,7 @@ Because the simulation is deterministic, two or more machines receiving the same
 
 ### IV.B. Two-Layer Simulation and Rendering Architecture
 
-A complementary two-layer architecture separates the integer simulation layer from a rendering layer that may use float-precision or other visual representations: the integer state is the authoritative truth, synced and deterministic; the rendering is local and may diverge freely between machines without affecting game outcome.
+A complementary two-layer architecture separates the integer simulation layer from a rendering layer that may use float-precision or other visual representations: the integer state is the authoritative truth, synced and deterministic; the rendering is local and may diverge freely between machines without affecting game outcome. Because the simulation grid is already a GPU buffer, the rendering pipeline may read directly from it as instance attributes, vertex data, or texture input, with no CPU readback, no copy, and no intermediate transfer. Both layers may share the same GPU device and command encoder, with the compute pass writing the simulation state and the render pass reading it within the same frame submission.
 
 ### IV.C. Gravitational Structure Field as Entity Coherence Skeleton
 
