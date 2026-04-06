@@ -1,0 +1,24 @@
+=== GHOST ADVECTION VIA PING-PONG READBACK ===
+32 cells, blob at 10-14, rho=500 momX=150, ghost[16]=777
+Background: rho=200, ghost=0
+
+  Tick  1: rho_peak=cell11(500)  ghost_peak=cell12(727)  mass=7900(7900)  ghost_total=3885(3890)  ghost_cells=7
+          profile: [(7, 'r200 g0'), (8, 'r200 g0'), (9, 'r205 g18'), (10, 'r405 g726'), (11, 'r500 g726'), (12, 'r500 g727'), (13, 'r500 g727'), (14, 'r495 g727'), (15, 'r295 g234')]
+  Tick  2: rho_peak=cell12(500)  ghost_peak=cell12(685)  mass=7900(7900)  ghost_total=3885(3890)  ghost_cells=8
+          profile: [(8, 'r201 g0'), (9, 'r221 g68'), (10, 'r399 g684'), (11, 'r435 g684'), (12, 'r500 g685'), (13, 'r495 g685'), (14, 'r482 g685'), (15, 'r302 g340'), (16, 'r265 g54')]
+  Tick  3: rho_peak=cell13(488)  ghost_peak=cell10(649)  mass=7900(7900)  ghost_total=3885(3890)  ghost_cells=10
+          profile: [(9, 'r238 g136'), (10, 'r388 g649'), (11, 'r425 g649'), (12, 'r456 g649'), (13, 'r488 g649'), (14, 'r465 g649'), (15, 'r313 g386'), (16, 'r272 g105'), (17, 'r242 g9')]
+  Tick  5: rho_peak=cell13(439)  ghost_peak=cell11(599)  mass=7900(7900)  ghost_total=3885(3890)  ghost_cells=12
+          profile: [(9, 'r258 g230'), (10, 'r372 g597'), (11, 'r411 g599'), (12, 'r425 g599'), (13, 'r439 g598'), (14, 'r431 g598'), (15, 'r326 g424'), (16, 'r279 g173'), (17, 'r255 g36')]
+  Tick 10: rho_peak=cell14(384)  ghost_peak=cell10(528)  mass=7900(7900)  ghost_total=3885(3890)  ghost_cells=14
+          profile: [(10, 'r348 g528'), (11, 'r369 g527'), (12, 'r383 g527'), (13, 'r380 g527'), (14, 'r384 g527'), (15, 'r314 g426'), (16, 'r293 g243'), (17, 'r264 g89'), (18, 'r255 g23')]
+  Tick 20: rho_peak=cell13(343)  ghost_peak=cell10(468)  mass=7900(7900)  ghost_total=3885(3890)  ghost_cells=16
+          profile: [(9, 'r290 g365'), (10, 'r310 g468'), (11, 'r322 g467'), (12, 'r340 g466'), (13, 'r343 g465'), (14, 'r328 g465'), (15, 'r307 g407'), (16, 'r292 g284'), (17, 'r270 g144')]
+  Tick 50: rho_peak=cell15(290)  ghost_peak=cell12(412)  mass=7900(7900)  ghost_total=3885(3890)  ghost_cells=18
+          profile: [(11, 'r282 g405'), (12, 'r279 g412'), (13, 'r284 g410'), (14, 'r279 g408'), (15, 'r290 g376'), (16, 'r272 g302'), (17, 'r279 g193'), (18, 'r254 g111'), (19, 'r251 g52')]
+  Tick 100: rho_peak=cell12(285)  ghost_peak=cell13(400)  mass=7900(7900)  ghost_total=3885(3890)  ghost_cells=18
+          profile: [(8, 'r253 g217'), (9, 'r269 g316'), (10, 'r282 g383'), (11, 'r276 g395'), (12, 'r285 g399'), (13, 'r284 g400'), (14, 'r278 g398'), (15, 'r276 g375'), (16, 'r277 g308')]
+
+=== FINAL CONSERVATION CHECK ===
+Mass:  7900 (want 7900) drift=0.00%
+Ghost: 3885 (want 3890) drift=-0.13%

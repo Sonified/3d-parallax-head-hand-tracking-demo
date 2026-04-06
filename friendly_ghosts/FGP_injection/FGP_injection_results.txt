@@ -1,0 +1,22 @@
+=== MID-STREAM GHOST INJECTION TEST ===
+32 cells, uniform rho=400 momX=120, omega=5/10
+Ticks 0-9: flow only, no ghosts
+Tick 10: INJECT ghost=900 into cells 14-18
+Ticks 11-60: flow with ghost data
+
+  Tick   1: mass=12800  (no ghost data)
+  Tick   6: mass=12800  (no ghost data)
+  Tick  10: mass=12800  (no ghost data)
+  >>> INJECTING ghost=900 into cells 14-18 <<<
+  Tick  11: mass=12800  ghost_total=4500  peak=cell14(900)  spread=5 cells
+  Tick  12: mass=12800  ghost_total=4500  peak=cell14(900)  spread=5 cells
+  Tick  13: mass=12800  ghost_total=4500  peak=cell14(900)  spread=5 cells
+  Tick  16: mass=12800  ghost_total=4500  peak=cell14(900)  spread=5 cells
+  Tick  21: mass=12800  ghost_total=4500  peak=cell14(900)  spread=5 cells
+  Tick  31: mass=12800  ghost_total=4500  peak=cell14(900)  spread=5 cells
+  Tick  41: mass=12800  ghost_total=4500  peak=cell14(900)  spread=5 cells
+  Tick  51: mass=12800  ghost_total=4500  peak=cell14(900)  spread=5 cells
+  Tick  60: mass=12800  ghost_total=4500  peak=cell14(900)  spread=5 cells
+
+Mass:  12800 drift=0.00%
+Ghost: 4500 (want 4500) drift=0.00%

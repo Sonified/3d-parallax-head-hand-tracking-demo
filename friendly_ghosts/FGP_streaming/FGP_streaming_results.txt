@@ -1,0 +1,50 @@
+=== STREAM-ONLY TEST (no collision) ===
+
+  m[12] k=[2/24,20/24,2/24]  bias=6  naive=0/16  inv=2/16  bias_corr=1/16  inv+bias=1/16
+    REGRESSION: g[-2]=0.0000 g[-1]=2.0000 g[0]=20.0000 g[+1]=2.0000 g[+2]=-0.0000 bias=6.0 rms=0.00 recovery=0/16
+    PINGPONG CORRECTION (pre-stream neighbors): 16/16
+    Detail for m[12]:
+      cell 0: injected=337  pre_stream_read=337  predicted=7116  actual_raw=7122  diff=6
+      cell 1: injected=67  pre_stream_read=67  predicted=2058  actual_raw=2064  diff=6
+      cell 2: injected=22  pre_stream_read=22  predicted=874  actual_raw=880  diff=6
+      cell 3: injected=150  pre_stream_read=150  predicted=3314  actual_raw=3320  diff=6
+      cell 4: injected=135  pre_stream_read=135  predicted=3248  actual_raw=3254  diff=6
+  m[13] k=[2/24,20/24,2/24]  bias=varies(4-6)  naive=0/16  inv=8/16  bias_corr=0/16  inv+bias=0/16
+    REGRESSION: g[-2]=-0.0005 g[-1]=2.0025 g[0]=20.0048 g[+1]=2.0041 g[+2]=0.0019 bias=3.4 rms=0.23 recovery=0/16
+    PINGPONG CORRECTION (pre-stream neighbors): 16/16
+  m[14] k=[2/8,4/8,2/8]  bias=4  naive=0/16  inv=0/16  bias_corr=0/16  inv+bias=1/16
+    REGRESSION: g[-2]=0.0000 g[-1]=2.0000 g[0]=4.0000 g[+1]=2.0000 g[+2]=0.0000 bias=4.0 rms=0.00 recovery=0/16
+      cell 0: raw=1636 neighbor_sum=1032.0 self_rec=151.0000 round=151 want=152
+      cell 1: raw=904 neighbor_sum=552.0 self_rec=88.0000 round=88 want=89
+      cell 2: raw=1662 neighbor_sum=1186.0 self_rec=119.0000 round=119 want=120
+      cell 3: raw=3044 neighbor_sum=1048.0 self_rec=499.0000 round=499 want=500
+      cell 4: raw=2968 neighbor_sum=1372.0 self_rec=399.0000 round=399 want=400
+    PINGPONG CORRECTION (pre-stream neighbors): 0/16
+    CALIBRATED PINGPONG (offset=+1): 16/16
+  m[15] k=[2/8,4/8,2/8]  bias=4  naive=0/16  inv=0/16  bias_corr=0/16  inv+bias=0/16
+    REGRESSION: g[-2]=-0.0000 g[-1]=2.0000 g[0]=4.0000 g[+1]=2.0000 g[+2]=0.0000 bias=4.0 rms=0.00 recovery=0/16
+      cell 0: raw=1288 neighbor_sum=1164.0 self_rec=31.0000 round=31 want=32
+      cell 1: raw=2090 neighbor_sum=562.0 self_rec=382.0000 round=382 want=383
+      cell 2: raw=2318 neighbor_sum=1342.0 self_rec=244.0000 round=244 want=245
+      cell 3: raw=1776 neighbor_sum=644.0 self_rec=283.0000 round=283 want=284
+      cell 4: raw=1828 neighbor_sum=1540.0 self_rec=72.0000 round=72 want=73
+    PINGPONG CORRECTION (pre-stream neighbors): 0/16
+    CALIBRATED PINGPONG (offset=+1): 16/16
+  m[16] k=[4/8,0/8,4/8]  bias=4  naive=0/16  inv=0/16  bias_corr=0/16  inv+bias=0/16
+    REGRESSION: g[-2]=-0.0000 g[-1]=4.0000 g[0]=-0.0000 g[+1]=4.0000 g[+2]=-0.0000 bias=4.0 rms=0.00 recovery=0/16
+    PINGPONG CORRECTION (pre-stream neighbors): 0/16
+    DIRECT PINGPONG READ (self=0): 0/16  diffs={1}  with offset(+1): 16/16
+  m[17] k=[12/48,24/48,12/48]  bias=12  naive=0/16  inv=0/16  bias_corr=0/16  inv+bias=0/16
+    REGRESSION: g[-2]=0.0000 g[-1]=12.0000 g[0]=24.0000 g[+1]=12.0000 g[+2]=-0.0000 bias=12.0 rms=0.00 recovery=0/16
+    PINGPONG CORRECTION (pre-stream neighbors): 16/16
+  m[18] k=[4/16,8/16,4/16]  bias=6  naive=0/16  inv=0/16  bias_corr=0/16  inv+bias=0/16
+    REGRESSION: g[-2]=-0.0000 g[-1]=4.0000 g[0]=8.0000 g[+1]=4.0000 g[+2]=0.0000 bias=6.0 rms=0.00 recovery=0/16
+    PINGPONG CORRECTION (pre-stream neighbors): 16/16
+  m[10] k=[2/4,0/4,2/4]  bias=2  naive=0/16  inv=0/16  bias_corr=0/16  inv+bias=0/16
+    REGRESSION: g[-2]=-0.0000 g[-1]=2.0000 g[0]=-0.0000 g[+1]=2.0000 g[+2]=-0.0000 bias=2.0 rms=0.00 recovery=0/16
+    PINGPONG CORRECTION (pre-stream neighbors): 0/16
+    DIRECT PINGPONG READ (self=0): 0/16  diffs={1}  with offset(+1): 16/16
+  m[11] k=[12/24,0/24,12/24]  bias=6  naive=0/16  inv=0/16  bias_corr=0/16  inv+bias=0/16
+    REGRESSION: g[-2]=-0.0000 g[-1]=12.0000 g[0]=0.0000 g[+1]=12.0000 g[+2]=0.0000 bias=6.0 rms=0.00 recovery=0/16
+    PINGPONG CORRECTION (pre-stream neighbors): 0/16
+    DIRECT PINGPONG READ (self=0): 16/16
