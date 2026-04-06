@@ -361,6 +361,26 @@ Entity survivability is likewise emergent rather than stored. No health field ex
 
 Cell behaviors that require apparent randomness (for example jitter, random walk, or stochastic decay) may use a deterministic pseudorandom number generator seeded from values that are deterministically identical on all machines, including but not limited to the cell's grid position, the current simulation tick count, cell state values such as temperature, or combinations thereof (for example via xorshift32 or other integer PRNG). Because the seed is derived entirely from values that are identical on all machines (grid position is structural, tick count and cell state are synchronized by the deterministic simulation), the PRNG output is bit-identical across all participating machines without transmitting or synchronizing any random state over the network. Each cell independently computes its own "randomness" and all machines agree on the result. This provides visually random behavior (particles jitter, decay varies, spawn timing fluctuates) while maintaining the strict determinism required by the multiplayer architecture of Claim IV and the rollback netcode of IV.E.
 
+### IV.I. Universal Blur Shader with LUT-Selected Physics
+
+Multiple physically distinct simulation operations, including but not limited to gravitational field computation, velocity diffusion (viscosity), pressure solving, and temperature conduction, may be recognized as instances of the same mathematical operation: a Gaussian blur (or other convolution) with a domain-specific kernel. A single universal compute shader may implement this convolution, with the physical behavior determined entirely by which lookup table (LUT) of kernel weights is selected at dispatch time. The shader reads from a shared LUT buffer, where each physics operation corresponds to a different offset and radius within that buffer.
+
+For example, gravity may use a wide kernel (for example radius 59, large sigma) to produce long-range smooth fields. Velocity diffusion may use a narrow kernel (for example radius 5, small sigma) for local momentum spreading. Pressure solving may use multiple kernels at different scales dispatched in parallel channels. All three use the same shader code, the same tile-loading logic, the same accumulation loop. The LUT is the only thing that changes between dispatches.
+
+This unification may reduce the shader codebase to a single parameterized compute shader that handles all diffusion-like physics operations in the simulation. The number of dispatches per tick is determined by the number of physics operations and their axis-separable passes (for example 3 axes per operation), not by the number of distinct shader programs. Adding a new physics operation (for example magnetic field propagation) may require only defining a new LUT entry, not writing a new shader.
+
+### IV.J. Orthogonal Transition Systems within a Single Dispatch
+
+Material state transitions in the simulation may be driven by three independent and orthogonal systems, each reading from a separate compact lookup table and each triggering on a different condition:
+
+1. **Phase transitions** driven by the cell's own temperature. A phase table indexed by material ID may encode an upper temperature threshold and target material, and a lower temperature threshold and target material. When the cell's temperature crosses either threshold, the material transforms (for example ice to water to steam, or towel to charred towel to ash). Moisture properties in the material table may act as a heat sink, stalling temperature rise at a threshold until moisture is exhausted (for example wet wood stalls at boiling point before igniting).
+
+2. **Contact transitions** driven by neighboring material types. A contact table indexed by material ID may encode a trigger material category, a result material, and a neighbor count threshold. When enough neighbors of the trigger category are adjacent, the cell transforms (for example dry towel becomes wet towel when adjacent to water, metal becomes dissolved metal when adjacent to acid).
+
+3. **Lifecycle transitions** driven by CA birth events. A child material table indexed by parent material ID may specify that newly birthed cells become a different material than their parent, enabling generational progression (for example seed to sprout to stem to branch to leaf to flower to fruit, cycling back to seed).
+
+All three transition systems may be evaluated within a single advection or CA dispatch at zero additional compute cost, because the neighbor reads and temperature values required are already available from the primary simulation computation. The three systems are orthogonal: temperature, neighbor identity, and birth events are independent triggers that do not interfere with each other, and a cell may undergo transitions from any combination of the three systems within a single tick.
+
 ---
 
 ## Claim V. Flat-Grid Force Field Approximation for Real-Time GPU Simulation
