@@ -140,6 +140,18 @@ Because the listener position updates with physical head movement, additional pe
 
 The combination of head-tracked panning, Doppler shift, and spectral unmasking, all driven by the same head-tracked listener position, may produce correlated changes across four or more perceptual dimensions simultaneously, including visual position, binaural pan, pitch, timbre, and spectral mass, from a single face-tracking pipeline.
 
+### I.N. Summary-Driven Spatial Audio from Simulation State
+
+In scenes containing dozens, hundreds, or thousands of localized sound-producing events (for example elemental interactions across a voxel simulation grid), instantiating a discrete audio source per event may exceed the practical limits of the audio processing system. This disclosure describes an alternative approach in which spatial audio may be generated from summary statistics of the simulation state rather than from individual point sources.
+
+The simulation grid or scene state may be spatially subdivided at one or more levels of granularity, and summary information may be computed for each region, including but not limited to the dominant element types, aggregate intensity, average direction of motion, distance from the listener, and overall activity level. This summary information, which may correspond to the meta grid hierarchy described in Claim IV or any equivalent spatial summary, may then drive audio synthesis or sample triggering to produce a spatial sound field representative of the activity in each region. The audio generation may use any combination of techniques including but not limited to: triggering of audio samples at varying playback speeds, synthesis of filtered noise, granular synthesis, or other generative audio methods.
+
+The summary-driven approach is not limited to the user's visual field. Activity occurring outside the current view but within audible range may contribute to the spatial audio output, providing the listener with awareness of off-screen events through sound.
+
+Doppler effects may be computed from the primary motion vector of sound-generating elements within each summarized region, using the same velocity projection technique described in I.M, applied to the aggregate motion rather than to individual sources. Distance-dependent spectral filtering may be implemented by pre-assigning a set of filters to varying depth ranges in the scene, such that elements or content farther from the listener may be rendered with reduced high-frequency content in alignment with the precedence effect and natural atmospheric absorption. As elements move closer to the listener, the audio signal may transition between these pre-filtered distance channels, either abruptly or smoothly.
+
+The result is that a scene with many localized sound-producing events may be auditorily rendered with a minimal number of playback or synthesis objects, each representing a spatial region rather than an individual source. This approach may be combined with traditional point-source audio generation, in which individual sounds may be attached to specific game objects and may be continuously looped or triggered by specific in-game events. The summary-driven and point-source approaches may operate simultaneously, with summary-driven audio providing the ambient spatial field and point-source audio providing discrete event feedback.
+
 ---
 
 ## Claim II. Zero-Readback GPU-Accelerated ML Pipeline for Real-Time Vision
