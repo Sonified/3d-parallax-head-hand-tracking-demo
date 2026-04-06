@@ -44,7 +44,7 @@ In integer LBM, the MRT transformation matrix M produces ghost moments with diff
 
 For example, in one embodiment using D3Q19 with integer distributions, the 9 ghost modes may carry the following capacities: 5 bits, 8 bits, 8 bits, 8 bits, 7 bits, 9 bits, 10 bits, 10 bits, and 10 bits, for a total of 75 bits of metadata per cell across 9 channels. The encoding may use a single integer multiply per channel on write (for example value * 8 for a 10-bit channel) and a single integer add-and-divide on read (for example (ghost + 4) / 8, where the rounding offset is LCD / 2). Channels whose LCD is a power of 2 (for example 8) may use bit shift operations for exact encoding and decoding with no rounding required.
 
-This encoding scheme may achieve exact round-trip fidelity for all metadata values within each channel's bit range, because the scaling factors are derived from the integer structure of the transformation matrix rather than from floating-point approximations. The per-channel capacity varies because different ghost eigenvectors have different LCD values, but the total capacity (for example 75 bits) may exceed the persistent cell state (for example 64 bits in a 2-u32 cell), meaning the ghost modes carry more flowing metadata than the cell itself stores.
+This encoding scheme may achieve exact round-trip fidelity for all metadata values within each channel's bit range, because the scaling factors are derived from the integer structure of the transformation matrix rather than from floating-point approximations. The per-channel capacity varies because different ghost eigenvectors have different LCD values, but the total capacity (for example 75 bits) may exceed the persistent cell state (for example 64 bits in a 2-u32 cell), meaning the ghost modes carry more flowing metadata than the cell itself stores. See Appendix I for the complete ghost mode encoding and decoding matrix.
 
 ### I.B. Emergent Spatial Audio from LBM Pressure Field Sampling
 
@@ -540,6 +540,44 @@ The method may exhibit the following GPU execution characteristics that distingu
 ### VIII.E. Generality Beyond Voxel Simulation
 
 While demonstrated in the context of the voxel simulation described in Claim VI, this method applies to any GPU compute workload requiring approximate inverse-square force fields on a regular 3D grid, including but not limited to gravitational simulation, electrostatic field computation, fluid pressure solving, or other applications where distant contributions fall off with distance and spatial averaging provides acceptable approximation of the full convolution.
+
+---
+
+## Appendix I. Ghost Mode Encoding and Decoding Matrix
+
+Integer-exact encoding and decoding operations for the 9 ghost modes in D3Q19 LBM with integer distributions. Each ghost mode's LCD (least common divisor) determines its encoding capacity. The rounding offset for decoding is always LCD / 2.
+
+### Encode (write metadata into ghost moments)
+
+```
+ghost[2]  = value * 252        // capacity: 0-32,   5 bits
+ghost[4]  = value * 40         // capacity: 0-204,  8 bits
+ghost[6]  = value * 40         // capacity: 0-204,  8 bits
+ghost[8]  = value * 40         // capacity: 0-204,  8 bits
+ghost[10] = value * 72         // capacity: 0-113,  7 bits
+ghost[12] = value * 24         // capacity: 0-341,  9 bits
+ghost[16] = value * 8          // capacity: 0-1023, 10 bits
+ghost[17] = value * 8          // capacity: 0-1023, 10 bits
+ghost[18] = value * 8          // capacity: 0-1023, 10 bits
+```
+
+### Decode (read metadata from ghost moments)
+
+```
+value = (ghost[2]  + 126) / 252    // round to nearest
+value = (ghost[4]  + 20)  / 40     // round to nearest
+value = (ghost[6]  + 20)  / 40     // round to nearest
+value = (ghost[8]  + 20)  / 40     // round to nearest
+value = (ghost[10] + 36)  / 72     // round to nearest
+value = (ghost[12] + 12)  / 24     // round to nearest
+value = ghost[16] >> 3             // exact, no rounding needed
+value = ghost[17] >> 3             // exact, no rounding needed
+value = ghost[18] >> 3             // exact, no rounding needed
+```
+
+### Summary
+
+Total capacity: 75 bits per cell across 9 channels (5 + 8 + 8 + 8 + 7 + 9 + 10 + 10 + 10). One integer multiply per channel on write. One integer add-and-divide per channel on read. Channels with power-of-2 LCD (ghost[16], ghost[17], ghost[18]) use bit shift for exact decoding. All operations are integer-only. All round-trips are exact within each channel's bit range.
 
 ---
 
