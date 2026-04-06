@@ -363,7 +363,7 @@ Because the simulation is deterministic, two or more machines receiving the same
 
 A complementary two-layer architecture separates the integer simulation layer from a rendering layer that may use float-precision or other visual representations: the integer state is the authoritative truth, synced and deterministic; the rendering is local and may diverge freely between machines without affecting game outcome. Because the simulation grid is already a GPU buffer, the rendering pipeline may read directly from it as instance attributes, vertex data, or texture input, with no CPU readback, no copy, and no intermediate transfer. Both layers may share the same GPU device and command encoder, with the compute pass writing the simulation state and the render pass reading it within the same frame submission.
 
-### V.C. Field Structure as Entity Coherence Mechanism
+### V.C. Field Structure as Entity Coherence in an Entity-Free Substrate
 
 When a game entity such as a spell is instantiated, the primary grid may receive expanded particle mass (element counts, momentum), while a gravitational or force field (computed via any method, including but not limited to Claim VI or the universal blur shader of IV.E) may receive a core attractor at the entity's center with configurable strength and angular velocity. The particle mass has no intrinsic knowledge of its membership in an entity. It is integer state with forward momentum. The field core may pull the mass into formation. Shape, rotation, and coherence may emerge from the interaction between mass and field rather than being encoded per-particle or per-entity.
 
