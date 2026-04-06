@@ -357,4 +357,61 @@ Cell behaviors that require apparent randomness (for example jitter, random walk
 
 ---
 
+## Claim V. Flat-Grid Force Field Approximation for Real-Time GPU Simulation
+
+A method for computing gravitational or other inverse-square force fields on a 3D grid using a two-pass flat coarse grid approach that replaces sequential convolution, FFT-based solvers, or tree-based traversal methods with a single reduction pass and a single force-read pass, achieving equivalent physical accuracy with zero sequential dependency between cells and zero branching in GPU execution.
+
+Existing approaches to N-body gravitational computation on grids each have GPU-hostile characteristics. Particle-Mesh methods (Hockney & Eastwood, 1981) require FFT or iterative solvers with multiple sequential passes. Barnes-Hut (1986) requires divergent tree traversal that destroys GPU SIMD coherence. Fast Multipole Methods (Greengard & Rokhlin, 1987) are tree-based with the same GPU divergence problems. Separable Gaussian blur requires 3 sequential dispatches with global synchronization between each pass. The disclosed method eliminates all of these constraints.
+
+The method operates on two data structures: the fine simulation grid (for example 192x128x192 cells) and a flat coarse grid at reduced resolution (for example 8x downsampling on each axis, producing a coarse grid that may fit entirely in GPU L1 cache). A precomputed offset table stores relative 3D offsets into the coarse grid sorted by distance, and a precomputed falloff lookup table stores inverse-square attenuation values indexed by squared distance.
+
+### V.A. Two-Pass Force Computation
+
+Pass 1 (Reduction): A single compute dispatch reduces the fine grid to the coarse grid. Each workgroup handles one coarse chunk, summing the mass of all fine cells within it via shared-memory parallel reduction. All workgroups execute independently with no inter-workgroup dependency.
+
+Pass 2 (Force Read): A single compute dispatch over the full fine grid. Each thread determines which coarse chunk it belongs to, reads a fixed number of nearby coarse chunks via the precomputed offset table (for example 3 chunks), computes direction vectors from the cell position to each chunk center, multiplies chunk mass by the falloff LUT value, and accumulates the result into a force vector. Every thread in every workgroup performs the exact same operations: same number of memory reads, same arithmetic, same control flow. Zero branching.
+
+Only a single barrier between Pass 1 and Pass 2 is required. No sequential dependency exists between cells within either pass.
+
+### V.B. Benchmarked Accuracy and Performance
+
+Benchmarked on Apple Silicon GPU, WebGPU, with full physics simulation including element interactions, momentum diffusion, and gravity:
+
+| Arena | Cells | Blur gravity | Meta grid gravity | Speedup | Mass error (600 ticks) | COM drift |
+|---|---|---|---|---|---|---|
+| 192x128x192 | 4.72M | ~2.0ms | ~0.5ms | 4x (77%) | 0.3% | 0.0 cells |
+| 256x128x256 | 8.39M | ~5.0ms | ~1.2ms | 4x (75%) | 0.3% | 0.0 cells |
+
+After 600 ticks of full physics simulation, the 3-sample meta grid produces a mass distribution with 0.3% error and zero measurable center-of-mass drift compared to the full Gaussian blur baseline. The simulations are physically indistinguishable. Quality does not degrade with arena scale.
+
+At the larger arena size, the blur baseline barely survives 120fps (0.3ms headroom). The meta grid method has 4.0ms headroom at the same arena size. The blur was the arena size ceiling. The meta grid removes that ceiling.
+
+### V.C. Optimal Downsampling Factor
+
+The downsampling factor determines the coarse chunk size and affects both speed and accuracy:
+
+| Downsample | Chunk size | Mass error (600 ticks) | Speed improvement |
+|---|---|---|---|
+| 4x | 4x4x4 (64 cells) | 0.4% | 65-71% |
+| 8x | 8x8x8 (512 cells) | 0.3% | 71-77% |
+| 16x | 16x16x16 (4096 cells) | 1.9% | 70-71% |
+
+8x downsampling may be optimal: coarse enough for effective spatial averaging, fine enough to preserve spatial detail, and the coarse grid fits in GPU L1 cache. The method's accuracy may improve (not degrade) with coarser chunks up to a point, because coarser spatial averaging better matches the smooth nature of gravitational fields.
+
+### V.D. GPU Execution Characteristics
+
+The method may exhibit the following GPU execution characteristics that distinguish it from prior force field computation approaches:
+
+- Zero branching: every thread executes the same instruction sequence, with no tree traversal, no conditional chunk selection, and no early termination
+- Uniform memory access: every thread reads the same fixed number of offsets from the coarse grid relative to its own chunk position, producing identical memory access patterns across the entire dispatch
+- No sequential dependency between cells within either pass: cells may execute in any order
+- Cache-friendly: the coarse grid, falloff LUT, and offset table may fit entirely in GPU L1 cache, with the only VRAM traffic being fine-grid mass reads (Pass 1) and force vector writes (Pass 2)
+- Linear scaling: O(N x K) where N is cell count and K is sample count, with K typically 3
+
+### V.E. Generality Beyond Voxel Simulation
+
+While demonstrated in the context of the voxel simulation described in Claim IV, this method applies to any GPU compute workload requiring approximate inverse-square force fields on a regular 3D grid, including but not limited to gravitational simulation, electrostatic field computation, fluid pressure solving, or other applications where distant contributions fall off with distance and spatial averaging provides acceptable approximation of the full convolution.
+
+---
+
 The source code in this repository is released under the MIT License. This document is a public technical disclosure establishing prior art; it is not a license grant for any patent claims.
