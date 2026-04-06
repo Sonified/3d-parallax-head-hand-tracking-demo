@@ -285,49 +285,17 @@ In a language acquisition context, for example American Sign Language, the same 
 
 ---
 
-## Claim IV. Deterministic Integer GPU Compute as Serverless Peer-to-Peer Multiplayer Substrate
+## Claim IV. Integer Voxel Physics Substrate
 
-A parallelized deterministic integer compute simulation running on GPU compute shaders (for example WebGPU, or any equivalent GPU compute API), serving as the authoritative game state for peer-to-peer multiplayer in a client-side runtime such as a browser. Integer-only arithmetic (including but not limited to u8, u16, u32, or other fixed-width integer types) guarantees bit-identical output across all hardware. No floating point. No rounding ambiguity. No hardware-dependent divergence. No authoritative server is required.
-
-Two independent machines may each simulate a complete emergent physics world and remain bit-identical across arbitrarily many cell updates, synchronized entirely through compact input recipes rather than state transmission, enabling serverless peer-to-peer multiplayer of emergent physics simulations in a client-side runtime. The specific combination of deterministic integer GPU compute as a simulation substrate, compact recipe-based state sync, and rollback netcode running entirely in a client-side runtime represents a novel multiplayer architecture.
-
-Multiplayer simulation requiring bit-identical state across all participating machines cannot tolerate floating-point arithmetic, which produces hardware-dependent rounding differences that compound across millions of cell updates and produce divergent game states within seconds. Integer-only arithmetic is therefore not a design preference but an architectural requirement for serverless deterministic multiplayer at scale.
-
-Deterministic systems such as cellular automata are natural fits for this substrate. For example, a 3D cellular automaton operating on a voxel grid (for example up to 128x64x256 cells or other grid dimensions), each cell storing packed integer state (for example 32 bytes), where every active cell reads its neighbors (for example 26 in a Moore neighborhood, or 6 in a von Neumann neighborhood, or other stencil configurations) and computes its next state from integer logic alone. Grid dimensions may be quantized to multiples of the GPU workgroup size (for example multiples of 64) to ensure optimal thread occupancy and avoid wasted dispatch lanes.
+An integer-only voxel physics simulation running on GPU compute shaders (for example WebGPU, or any equivalent GPU compute API), in which all physics computation uses fixed-width integer arithmetic with no floating-point operations. The simulation operates on a 3D voxel grid (for example up to 128x64x256 cells or other grid dimensions) where every active cell reads its neighbors (for example 26 in a Moore neighborhood, or 6 in a von Neumann neighborhood, or other stencil configurations) and computes its next state from integer logic alone. Grid dimensions may be quantized to multiples of the GPU workgroup size (for example multiples of 64) to ensure optimal thread occupancy.
 
 ### Prior art context
 
 Per-cell physics simulation as a game world architecture: Noita (Nolla Games, 2019), Sandspiel (2018), Powder Game (2008), and the broader falling sand game genre. The most comparable systems in terms of simulation complexity, Noita (falling sand physics with per-pixel element interactions) and Teardown (voxel destruction physics), are native desktop applications built with custom C++/GPU engines. Neither runs in a browser, and neither implements dual-player element collision with a multi-element interaction matrix. No known browser-based system performs deterministic per-cell physics simulation with dual-player element interaction, multi-element collision matrices, and recomputed gravitational fields at grid scales exceeding one million cells at interactive frame rates, as of the date of this disclosure.
 
-### IV.A. Recipe-Based State Sync
+### IV.A. 10-Bit Cell Packing for Integer Voxel Simulation
 
-Because the simulation is deterministic, two or more machines receiving the same inputs produce identical state without exchanging simulation data. Game entities such as spells or other interactive objects are transmitted as compact recipes (for example approximately 30 bytes) rather than cell-by-cell state. All machines expand the recipe identically using a shared deterministic PRNG seed or equivalent deterministic expansion method. The expansion relies on integer-only pseudorandom number generation, such as xorshift, which produces bit-identical sequences from identical seeds on all hardware architectures, requiring no floating-point operations and no hardware-specific numerical behavior. This can reduce per-entity network cost by an order of magnitude or more (for example approximately 40x in one configuration). The entire multiplayer simulation may run peer-to-peer over low-latency transport channels such as WebRTC data channels, WebSocket, or other real-time protocols, at bandwidths on the order of kilobytes per second (for example approximately 5.9 KB/sec in one configuration).
-
-### IV.B. Two-Layer Simulation and Rendering Architecture
-
-A complementary two-layer architecture separates the integer simulation layer from a rendering layer that may use float-precision or other visual representations: the integer state is the authoritative truth, synced and deterministic; the rendering is local and may diverge freely between machines without affecting game outcome. Because the simulation grid is already a GPU buffer, the rendering pipeline may read directly from it as instance attributes, vertex data, or texture input, with no CPU readback, no copy, and no intermediate transfer. Both layers may share the same GPU device and command encoder, with the compute pass writing the simulation state and the render pass reading it within the same frame submission.
-
-### IV.C. Field Structure as Entity Coherence Mechanism
-
-When a game entity such as a spell is instantiated, the primary grid may receive expanded particle mass (element counts, momentum), while a gravitational or force field (computed via any method, including but not limited to Claim V or the universal blur shader of IV.K) may receive a core attractor at the entity's center with configurable strength and angular velocity. The particle mass has no intrinsic knowledge of its membership in an entity. It is integer state with forward momentum. The field core may pull the mass into formation. Shape, rotation, and coherence may emerge from the interaction between mass and field rather than being encoded per-particle or per-entity.
-
-As the entity travels through the simulation volume, the field core may travel with it, maintaining rotational structure. When the entity collides with opposing elements, the primary simulation resolves element interactions and mass is consumed. The field core may weaken as its mass depletes. Entity termination occurs when the field structure loses sufficient mass to maintain coherence, rather than when a discrete health value reaches zero.
-
-Multiple entities may create overlapping field influences that sum. The simulation reads the net result and each element may respond according to its mass property from a global element table. Entity identity is defined by the presence of a field core. Entity coherence is maintained by the field's pull on surrounding mass. The field is therefore not an auxiliary force system but the mechanism by which entities exist, cohere, and terminate within the simulation.
-
-### IV.D. Sparse Compute Dispatch
-
-An active cell list or equivalent sparse data structure maintains only occupied cells and their neighbor halos, reducing GPU thread dispatch from the full grid volume to only the active region (for example dispatching hundreds of threads for a localized entity instead of millions for the full grid). Each tick, the GPU writes back which cells are newly active and which went inactive, maintaining the list frame to frame. A complementary hierarchical approach may divide the grid into chunks with per-chunk active flags, dispatching compute only on active chunks.
-
-The active cell set may simultaneously serve as both the compute dispatch structure and the visual representation of the simulation. Because only active cells are dispatched for computation, and only active cells contain state worth rendering, the set of cells the GPU computes and the set of cells the renderer draws may be the same data structure. The visual output is not a secondary rendering pass over game state but a direct readout of the compute topology itself. Where no computation occurs, no visual content exists. The optimization and the visualization are unified rather than layered.
-
-### IV.E. Rollback Netcode on GPU Compute
-
-The determinism of the integer simulation enables rollback-based netcode models such as GGPO: each machine runs speculatively with predicted opponent input, and on mismatch rewinds to the last confirmed state and re-simulates forward. The integer simulation is efficient enough on GPU compute to re-run multiple frames (for example 3-5 frames) in a single tick without dropping below interactive frame rates.
-
-### IV.F. 10-Bit Cell Packing for Deterministic Integer Voxel Simulation
-
-Each voxel in the simulation grid may store its physics state packed at 10-bit precision rather than the conventional 16-bit, fitting a complete 3D physics state into 2 native 32-bit words rather than 3. Within the deterministic integer-only simulation required for serverless multiplayer (Claim IV), this optimization achieves a measured 14x improvement in neighbor stencil read performance and 33% memory reduction over 16-bit packing, due to the resulting increase in cache line density.
+Each voxel in the simulation grid may store its physics state packed at 10-bit precision rather than the conventional 16-bit, fitting a complete 3D physics state into 2 native 32-bit words rather than 3. This optimization achieves a measured 14x improvement in neighbor stencil read performance and 33% memory reduction over 16-bit packing, due to the resulting increase in cache line density.
 
 A 3D physics simulation with persistent temperature requires at minimum 5 scalar fields per cell (mass, temperature, and 3 momentum components) plus metadata such as material identity and player ownership. These fields must persist between ticks; quantities derivable from cell state (for example gravitational force vectors and pressure) may be moved to transient scratch buffers, but mass, temperature, and momentum cannot. In runtimes where the smallest addressable unit is a 32-bit word (for example u32 in WebGPU/WGSL), 16-bit fields fit only 2 per word, requiring 3 u32s (12 bytes) for the complete state. At 10 bits per field, 3 fields plus 2 flag bits fit per word (10 + 10 + 10 + 1 + 1 = 32), and the complete state fits in exactly 2 u32s (8 bytes) with zero bits unused. 10 bits is the maximum field precision at which this fit is achievable.
 
@@ -335,35 +303,31 @@ The 8-byte vs 12-byte cell size directly determines cache performance: a 128-byt
 
 Velocity quantization in integer physics simulations may cause particles to lock into rational orbits (deterministic rail artifacts). A deterministic subpixel jitter derived from cell position via an integer hash function (for example a Weyl hash) may break these rational orbit locks without introducing floating-point arithmetic or non-deterministic randomness.
 
-### IV.G. Data-Driven Physics via Behavior Lookup Table and Element Property Table
+### IV.B. Data-Driven Physics via Behavior Lookup Table and Element Property Table
 
 The cell may include a behavior or material index (for example a single byte supporting up to 256 types) that indexes into a compact behavior lookup table (for example 32 bytes per entry, 8KB total) defining how that cell's contents propagate, reproduce, interact, and decay. The lookup table may encode parameters including but not limited to: propagation rules (for example a Wolfram CA rule number or other transition function), reproduction behavior (spawn rate, threshold, child type), lifecycle parameters (fuse timer, phase shifting, decay rate), combat interactions (element drain, contagion, combo triggers), movement characteristics (surface affinity, wall behavior, jitter amplitude), and visual properties (stealth, brightness curve). The behavior of any game entity is fully defined by its LUT entry; no per-entity code, scripts, or object instances are required.
 
 Each element type in the simulation may additionally be defined by a per-element property table encoding continuous physical characteristics, including but not limited to mass, viscosity, conductivity, brittleness, hardness, elasticity, surface tension, and flammability. These properties govern how elements respond to forces, temperature gradients, and contact with other element types. An N-by-N interaction matrix (for example 32x32 for 32 element types) may define the pairwise outcome when any two element types are co-located within the same cell or occupy adjacent cells, producing emergent physical behavior from table lookups rather than scripted logic. This is distinct from block-based voxel systems (for example Minecraft) where blocks have discrete types but lack continuous physical properties, and where interactions such as fluid flow or explosion damage are implemented as special-case algorithms rather than emerging from a universal property table and interaction matrix.
 
-### IV.H. Generative and Temperature-Modulated CA Rules
+### IV.C. Generative and Temperature-Modulated CA Rules
 
 The LUT and element table may drive behaviors beyond cellular automata rules. For example, a nature element's LUT entry may encode structured growth parameters such as fractal branching ratios, segment lengths before splitting, and branch angle ranges, producing tree-like or vine-like structures from local cell decisions without a global growth planner. The CA neighbor stencil is one mechanism available to the LUT, but the LUT may encode any generative rule, including L-system-like growth, reaction-diffusion patterns, or other structured behaviors that use the neighbor state as input but are not limited to traditional CA transition functions.
 
 The propagation rule stored in the LUT or element table (for example a Wolfram CA rule number) need not be static. A cell state value such as temperature, which persists tick to tick and propagates via conduction between neighbors, may modulate the effective propagation rule at runtime. For example, the effective rule may be computed as `(base_rule + temperature / N) % 256` where N is a scaling constant, causing the same element to exhibit different CA propagation behavior across its temperature range. Cold cells propagate in orderly, predictable patterns; hot cells propagate chaotically. A cooling lava flow transitions gradually from turbulent to solid behavior not through scripted animation but through the rule number sliding along the Wolfram spectrum as temperature conducts away. This produces emergent visual and behavioral complexity from the interaction of two integer cell fields (element type and temperature) with zero additional state or computation beyond the modular arithmetic already present in the CA tick.
 
-### IV.I. Entity-Free Interaction via Substrate Evolution
+### IV.D. Entity-Free Interaction via Substrate Evolution
 
 In traditional game architectures, interactive entities such as spells, projectiles, or creatures are explicitly instantiated objects with properties (for example health points, position, velocity, lifetime) managed by game logic. Each entity is allocated, updated per frame, checked for collisions, and eventually garbage collected. This system eliminates the entity abstraction entirely. No entity objects exist. No entity allocation, no garbage collection, no collision detection system, no per-entity update loop.
 
-Instead, game entities may be seeded as initial conditions: element counts, momentum, gravity, and a behavior index written to cells on the input face of the simulation grid. The CA substrate evolves them according to the behavior LUT (IV.G). What the player perceives as a "fireball" or "ice wall" or "hive" is an emergent structure, a region of cells whose behavior LUT entries produce coherent collective motion, not a managed object with an identity. Elements in the simulation need not be owned by or affiliated with a specific player. Elements may exist as environmental substrate with inherent physical properties (for example heat, dispersal, toxicity) that affect any player on contact, and either player may influence existing elements through gesture input, for example summoning wind to redirect fire or raising an earth shield to negate an incoming element's properties.
+Instead, game entities may be seeded as initial conditions: element counts, momentum, gravity, and a behavior index written to cells on the input face of the simulation grid. The CA substrate evolves them according to the behavior LUT (IV.B). What the player perceives as a "fireball" or "ice wall" or "hive" is an emergent structure, a region of cells whose behavior LUT entries produce coherent collective motion, not a managed object with an identity. Elements in the simulation need not be owned by or affiliated with a specific player. Elements may exist as environmental substrate with inherent physical properties (for example heat, dispersal, toxicity) that affect any player on contact, and either player may influence existing elements through gesture input, for example summoning wind to redirect fire or raising an earth shield to negate an incoming element's properties.
 
 The simulation substrate is not limited to combat. The same element properties, interaction matrix, and gesture-driven manipulation may support gameplay incorporating elements of competitive physics-based combat, competitive or cooperative world-building in which one or more players construct and evolve structures within the simulation, free exploration of an emergent physical environment, or any combination thereof. The interaction model is defined by the element table and behavior LUT, not by a fixed game genre.
 
 Multi-generational entity chains (for example a hive that spawns drones, or a spore cloud that spawns spores that become tendrils) may emerge from the spawn_type field in the behavior LUT alone, with no spawning system, no entity manager, and no parent-child relationships in code. The GPU processes cells, not entities. One fused compute dispatch (II.C) handles all game interactions simultaneously because they are all cells following LUT rules.
 
-Entity survivability is likewise emergent rather than stored. No health field exists. A region of dense element concentration (for example 200 fire particles) survives longer because decay takes more ticks to reach zero. A thin region (for example 5 particles) dies in a few ticks. A gravity core (IV.C) maintains concentration by pulling mass together. The visual representation of an entity's state, its size, brightness, and particle density, is a direct readout of its element concentration, not a rendering of a separate health variable. The visual state of an entity directly communicates its survivability without requiring a separate health indicator.
+Entity survivability is likewise emergent rather than stored. No health field exists. A region of dense element concentration (for example 200 fire particles) survives longer because decay takes more ticks to reach zero. A thin region (for example 5 particles) dies in a few ticks. A gravity core (V.C) maintains concentration by pulling mass together. The visual representation of an entity's state, its size, brightness, and particle density, is a direct readout of its element concentration, not a rendering of a separate health variable. The visual state of an entity directly communicates its survivability without requiring a separate health indicator.
 
-### IV.J. Deterministic Positional PRNG for Visual Randomness
-
-Cell behaviors that require apparent randomness (for example jitter, random walk, or stochastic decay) may use a deterministic pseudorandom number generator seeded from values that are deterministically identical on all machines, including but not limited to the cell's grid position, the current simulation tick count, cell state values such as temperature, or combinations thereof (for example via xorshift32 or other integer PRNG). Because the seed is derived entirely from values that are identical on all machines (grid position is structural, tick count and cell state are synchronized by the deterministic simulation), the PRNG output is bit-identical across all participating machines without transmitting or synchronizing any random state over the network. Each cell independently computes its own "randomness" and all machines agree on the result. This provides visually random behavior (particles jitter, decay varies, spawn timing fluctuates) while maintaining the strict determinism required by the multiplayer architecture of Claim IV and the rollback netcode of IV.E.
-
-### IV.K. Universal Blur Shader with LUT-Selected Physics
+### IV.E. Universal Blur Shader with LUT-Selected Physics
 
 Multiple physically distinct simulation operations, including but not limited to gravitational field computation, velocity diffusion (viscosity), pressure solving, and temperature conduction, may be recognized as instances of the same mathematical operation: a Gaussian blur (or other convolution) with a domain-specific kernel. A single universal compute shader may implement this convolution, with the physical behavior determined entirely by which lookup table (LUT) of kernel weights is selected at dispatch time. The shader reads from a shared LUT buffer, where each physics operation corresponds to a different offset and radius within that buffer.
 
@@ -371,7 +335,7 @@ For example, gravity may use a wide kernel (for example radius 59, large sigma) 
 
 This unification may reduce the shader codebase to a single parameterized compute shader that handles all diffusion-like physics operations in the simulation. The number of dispatches per tick is determined by the number of physics operations and their axis-separable passes (for example 3 axes per operation), not by the number of distinct shader programs. Adding a new physics operation (for example magnetic field propagation) may require only defining a new LUT entry, not writing a new shader.
 
-### IV.L. Orthogonal Transition Systems within a Single Dispatch
+### IV.F. Orthogonal Transition Systems within a Single Dispatch
 
 Material state transitions in the simulation may be driven by three independent and orthogonal systems, each reading from a separate compact lookup table and each triggering on a different condition:
 
@@ -385,17 +349,55 @@ All three transition systems may be evaluated within a single advection or CA di
 
 ---
 
-## Claim V. Flat-Grid Force Field Approximation for Real-Time GPU Simulation
+## Claim V. Deterministic Integer Multiplayer via Serverless Peer-to-Peer State Sync
+
+The integer-only voxel physics substrate described in Claim IV may serve as the authoritative game state for peer-to-peer multiplayer in a client-side runtime such as a browser, requiring no authoritative server. Integer-only arithmetic (including but not limited to u8, u16, u32, or other fixed-width integer types) guarantees bit-identical output across all hardware. No floating point. No rounding ambiguity. No hardware-dependent divergence.
+
+Two independent machines may each simulate a complete emergent physics world and remain bit-identical across arbitrarily many cell updates, synchronized entirely through compact input recipes rather than state transmission. Multiplayer simulation requiring bit-identical state across all participating machines cannot tolerate floating-point arithmetic, which produces hardware-dependent rounding differences that compound across millions of cell updates and produce divergent game states within seconds. Integer-only arithmetic is therefore not a design preference but an architectural requirement for serverless deterministic multiplayer at scale. The specific combination of deterministic integer GPU compute as a simulation substrate, compact recipe-based state sync, and rollback netcode running entirely in a client-side runtime represents a novel multiplayer architecture.
+
+### V.A. Recipe-Based State Sync
+
+Because the simulation is deterministic, two or more machines receiving the same inputs produce identical state without exchanging simulation data. Game entities such as spells or other interactive objects are transmitted as compact recipes (for example approximately 30 bytes) rather than cell-by-cell state. All machines expand the recipe identically using a shared deterministic PRNG seed or equivalent deterministic expansion method. The expansion relies on integer-only pseudorandom number generation, such as xorshift, which produces bit-identical sequences from identical seeds on all hardware architectures, requiring no floating-point operations and no hardware-specific numerical behavior. This can reduce per-entity network cost by an order of magnitude or more (for example approximately 40x in one configuration). The entire multiplayer simulation may run peer-to-peer over low-latency transport channels such as WebRTC data channels, WebSocket, or other real-time protocols, at bandwidths on the order of kilobytes per second (for example approximately 5.9 KB/sec in one configuration).
+
+### V.B. Two-Layer Simulation and Rendering Architecture
+
+A complementary two-layer architecture separates the integer simulation layer from a rendering layer that may use float-precision or other visual representations: the integer state is the authoritative truth, synced and deterministic; the rendering is local and may diverge freely between machines without affecting game outcome. Because the simulation grid is already a GPU buffer, the rendering pipeline may read directly from it as instance attributes, vertex data, or texture input, with no CPU readback, no copy, and no intermediate transfer. Both layers may share the same GPU device and command encoder, with the compute pass writing the simulation state and the render pass reading it within the same frame submission.
+
+### V.C. Field Structure as Entity Coherence Mechanism
+
+When a game entity such as a spell is instantiated, the primary grid may receive expanded particle mass (element counts, momentum), while a gravitational or force field (computed via any method, including but not limited to Claim VI or the universal blur shader of IV.E) may receive a core attractor at the entity's center with configurable strength and angular velocity. The particle mass has no intrinsic knowledge of its membership in an entity. It is integer state with forward momentum. The field core may pull the mass into formation. Shape, rotation, and coherence may emerge from the interaction between mass and field rather than being encoded per-particle or per-entity.
+
+As the entity travels through the simulation volume, the field core may travel with it, maintaining rotational structure. When the entity collides with opposing elements, the primary simulation resolves element interactions and mass is consumed. The field core may weaken as its mass depletes. Entity termination occurs when the field structure loses sufficient mass to maintain coherence, rather than when a discrete health value reaches zero.
+
+Multiple entities may create overlapping field influences that sum. The simulation reads the net result and each element may respond according to its mass property from a global element table. Entity identity is defined by the presence of a field core. Entity coherence is maintained by the field's pull on surrounding mass. The field is therefore not an auxiliary force system but the mechanism by which entities exist, cohere, and terminate within the simulation.
+
+### V.D. Sparse Compute Dispatch
+
+An active cell list or equivalent sparse data structure maintains only occupied cells and their neighbor halos, reducing GPU thread dispatch from the full grid volume to only the active region (for example dispatching hundreds of threads for a localized entity instead of millions for the full grid). Each tick, the GPU writes back which cells are newly active and which went inactive, maintaining the list frame to frame. A complementary hierarchical approach may divide the grid into chunks with per-chunk active flags, dispatching compute only on active chunks.
+
+The active cell set may simultaneously serve as both the compute dispatch structure and the visual representation of the simulation. Because only active cells are dispatched for computation, and only active cells contain state worth rendering, the set of cells the GPU computes and the set of cells the renderer draws may be the same data structure. The visual output is not a secondary rendering pass over game state but a direct readout of the compute topology itself. Where no computation occurs, no visual content exists. The optimization and the visualization are unified rather than layered.
+
+### V.E. Rollback Netcode on GPU Compute
+
+The determinism of the integer simulation enables rollback-based netcode models such as GGPO: each machine runs speculatively with predicted opponent input, and on mismatch rewinds to the last confirmed state and re-simulates forward. The integer simulation is efficient enough on GPU compute to re-run multiple frames (for example 3-5 frames) in a single tick without dropping below interactive frame rates.
+
+### V.F. Deterministic Positional PRNG for Visual Randomness
+
+Cell behaviors that require apparent randomness (for example jitter, random walk, or stochastic decay) may use a deterministic pseudorandom number generator seeded from values that are deterministically identical on all machines, including but not limited to the cell's grid position, the current simulation tick count, cell state values such as temperature, or combinations thereof (for example via xorshift32 or other integer PRNG). Because the seed is derived entirely from values that are identical on all machines (grid position is structural, tick count and cell state are synchronized by the deterministic simulation), the PRNG output is bit-identical across all participating machines without transmitting or synchronizing any random state over the network. Each cell independently computes its own "randomness" and all machines agree on the result. This provides visually random behavior (particles jitter, decay varies, spawn timing fluctuates) while maintaining the strict determinism required by the multiplayer architecture of Claim V and the rollback netcode of V.E.
+
+---
+
+## Claim VI. Flat-Grid Force Field Approximation for Real-Time GPU Simulation
 
 A method for computing gravitational or other inverse-square force fields on a 3D grid using a two-pass flat coarse grid approach that replaces sequential convolution, FFT-based solvers, or tree-based traversal methods with a single reduction pass and a single force-read pass, achieving equivalent physical accuracy with zero sequential dependency between cells and zero branching in GPU execution.
 
-The computed force field may be stored in transient scratch buffers recomputed each tick, in one or more additional persistent compute layers at simulation resolution, or packed directly into the cell state alongside element data. When packed into the cell, directional fields such as gravity vectors may use sign-magnitude representation (as described in Claim IV.F), with sign bits filling remaining bits of the native word (for example 3 additional 10-bit fields plus 3 sign bits fitting exactly into a third u32). When stored in transient buffers, the reduced persistent per-cell memory may improve cache utilization for neighbor stencil reads at the cost of per-tick recomputation.
+The computed force field may be stored in transient scratch buffers recomputed each tick, in one or more additional persistent compute layers at simulation resolution, or packed directly into the cell state alongside element data. When packed into the cell, directional fields such as gravity vectors may use sign-magnitude representation (as described in IV.A), with sign bits filling remaining bits of the native word (for example 3 additional 10-bit fields plus 3 sign bits fitting exactly into a third u32). When stored in transient buffers, the reduced persistent per-cell memory may improve cache utilization for neighbor stencil reads at the cost of per-tick recomputation.
 
 Existing approaches to N-body gravitational computation on grids each have GPU-hostile characteristics. Particle-Mesh methods (Hockney & Eastwood, 1981) require FFT or iterative solvers with multiple sequential passes. Barnes-Hut (1986) requires divergent tree traversal that destroys GPU SIMD coherence. Fast Multipole Methods (Greengard & Rokhlin, 1987) are tree-based with the same GPU divergence problems. Separable Gaussian blur requires 3 sequential dispatches with global synchronization between each pass. The disclosed method eliminates all of these constraints.
 
 The method operates on two data structures: the fine simulation grid (for example 192x128x192 cells) and a flat coarse grid at reduced resolution (for example 8x downsampling on each axis, producing a coarse grid that may fit entirely in GPU L1 cache). A precomputed offset table stores relative 3D offsets into the coarse grid sorted by distance, and a precomputed falloff lookup table stores inverse-square attenuation values indexed by squared distance.
 
-### V.A. Two-Pass Force Computation
+### VI.A. Two-Pass Force Computation
 
 Pass 1 (Reduction): A single compute dispatch reduces the fine grid to the coarse grid. Each workgroup handles one coarse chunk, summing the mass of all fine cells within it via shared-memory parallel reduction. All workgroups execute independently with no inter-workgroup dependency.
 
@@ -403,7 +405,7 @@ Pass 2 (Force Read): A single compute dispatch over the full fine grid. Each thr
 
 Only a single barrier between Pass 1 and Pass 2 is required. No sequential dependency exists between cells within either pass.
 
-### V.B. Benchmarked Accuracy and Performance
+### VI.B. Benchmarked Accuracy and Performance
 
 Benchmarked on Apple Silicon GPU, WebGPU, with full physics simulation including element interactions, momentum diffusion, and gravity:
 
@@ -416,7 +418,7 @@ After 600 ticks of full physics simulation, the 3-sample meta grid produces a ma
 
 At the larger arena size, the blur baseline barely survives 120fps (0.3ms headroom). The meta grid method has 4.0ms headroom at the same arena size. The blur was the arena size ceiling. The meta grid removes that ceiling.
 
-### V.C. Optimal Downsampling Factor
+### VI.C. Optimal Downsampling Factor
 
 The downsampling factor determines the coarse chunk size and affects both speed and accuracy:
 
@@ -428,7 +430,7 @@ The downsampling factor determines the coarse chunk size and affects both speed 
 
 8x downsampling may be optimal: coarse enough for effective spatial averaging, fine enough to preserve spatial detail, and the coarse grid fits in GPU L1 cache. The method's accuracy may improve (not degrade) with coarser chunks up to a point, because coarser spatial averaging better matches the smooth nature of gravitational fields.
 
-### V.D. GPU Execution Characteristics
+### VI.D. GPU Execution Characteristics
 
 The method may exhibit the following GPU execution characteristics that distinguish it from prior force field computation approaches:
 
@@ -438,7 +440,7 @@ The method may exhibit the following GPU execution characteristics that distingu
 - Cache-friendly: the coarse grid, falloff LUT, and offset table may fit entirely in GPU L1 cache, with the only VRAM traffic being fine-grid mass reads (Pass 1) and force vector writes (Pass 2)
 - Linear scaling: O(N x K) where N is cell count and K is sample count, with K typically 3
 
-### V.E. Generality Beyond Voxel Simulation
+### VI.E. Generality Beyond Voxel Simulation
 
 While demonstrated in the context of the voxel simulation described in Claim IV, this method applies to any GPU compute workload requiring approximate inverse-square force fields on a regular 3D grid, including but not limited to gravitational simulation, electrostatic field computation, fluid pressure solving, or other applications where distant contributions fall off with distance and spatial averaging provides acceptable approximation of the full convolution.
 
