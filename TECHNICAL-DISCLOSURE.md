@@ -327,7 +327,7 @@ The determinism of the integer simulation enables rollback-based netcode models 
 
 ### IV.F. Packed Cell Layout and Behavior Lookup Table
 
-Cell fields may be packed at 10-bit precision rather than the conventional 16-bit, fitting a complete 3D physics state into 2 native 32-bit words rather than 3. This optimization achieves a measured 14x improvement in neighbor stencil read performance and 33% memory reduction over 16-bit packing, due to the resulting increase in cache line density.
+Each voxel in the simulation grid may store its physics state packed at 10-bit precision rather than the conventional 16-bit, fitting a complete 3D physics state into 2 native 32-bit words rather than 3. This optimization achieves a measured 14x improvement in neighbor stencil read performance and 33% memory reduction over 16-bit packing, due to the resulting increase in cache line density.
 
 A 3D physics simulation with persistent temperature requires at minimum 5 scalar fields per cell (mass, temperature, and 3 momentum components) plus metadata such as material identity and player ownership. These fields must persist between ticks; quantities derivable from cell state (for example gravitational force vectors and pressure) may be moved to transient scratch buffers, but mass, temperature, and momentum cannot. In runtimes where the smallest addressable unit is a 32-bit word (for example u32 in WebGPU/WGSL), 16-bit fields fit only 2 per word, requiring 3 u32s (12 bytes) for the complete state. At 10 bits per field, 3 fields plus 2 flag bits fit per word (10 + 10 + 10 + 1 + 1 = 32), and the complete state fits in exactly 2 u32s (8 bytes) with zero bits unused. 10 bits is the maximum field precision at which this fit is achievable.
 
