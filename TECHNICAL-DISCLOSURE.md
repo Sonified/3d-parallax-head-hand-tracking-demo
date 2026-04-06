@@ -575,6 +575,32 @@ value = ghost[17] >> 3             // exact, no rounding needed
 value = ghost[18] >> 3             // exact, no rounding needed
 ```
 
+### Cross-Channel Correlation Matrix
+
+The following matrix shows the number of shared distributions (out of 19) between each pair of ghost modes. The correlation determines the LCD and therefore the encoding capacity of each channel: low overlap produces small LCDs and more bits; high overlap produces large LCDs and fewer bits.
+
+```
+        m[ 2] m[ 4] m[ 6] m[ 8] m[10] m[12] m[16] m[17] m[18]
+m[ 2]    --    10    10    10    18    12     8     8     8
+m[ 4]    10    --     4     4    10     8     8     4     4
+m[ 6]    10     4    --     4    10     6     4     8     4
+m[ 8]    10     4     4    --    10     6     4     4     8
+m[10]    18    10    10    10    --    12     8     8     8
+m[12]    12     8     6     6    12    --     8     4     4
+m[16]     8     8     4     4     8     8    --     4     4
+m[17]     8     4     8     4     8     4     4    --     4
+m[18]     8     4     4     8     8     4     4     4    --
+```
+
+Channel groupings by correlation structure:
+
+- **m[16], m[17], m[18]**: 4 shared distributions with each other. Least entangled. LCD=8. 10 bits each. Cleanest channels.
+- **m[4], m[6], m[8]**: symmetric triplet (energy flux x/y/z). 4 shared with each other. LCD=40. 8 bits each.
+- **m[12]**: medium coupling. LCD=24. 9 bits.
+- **m[2], m[10]**: 18 shared distributions (nearly total overlap). Most entangled pair. LCD=252 and LCD=72. 5 and 7 bits respectively.
+
+The correlation IS the encoding difficulty. The inverse transform must untangle shared distributions to recover each channel's value. Channels that share few distributions are easy to separate (small denominator, more bits). Channels that share many distributions require large scaling factors to achieve integer-exact separation (large denominator, fewer bits).
+
 ### Summary
 
 Total capacity: 75 bits per cell across 9 channels (5 + 8 + 8 + 8 + 7 + 9 + 10 + 10 + 10). One integer multiply per channel on write. One integer add-and-divide per channel on read. Channels with power-of-2 LCD (ghost[16], ghost[17], ghost[18]) use bit shift for exact decoding. All operations are integer-only. All round-trips are exact within each channel's bit range.
