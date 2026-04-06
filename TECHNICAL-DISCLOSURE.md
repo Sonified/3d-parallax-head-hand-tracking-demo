@@ -6,7 +6,7 @@
 
 This document is a public technical disclosure establishing prior art for the methods described below. It was made publicly accessible via the GitHub repository listed above on the date of publication; the git commit history provides timestamped evidence of publication. Earlier versions of this disclosure are preserved in the repository's commit history, with each commit establishing the disclosure date for the specific techniques described in that revision. Some techniques are implemented in this repository; others are implemented in related private repositories and disclosed here. All methods described are the original work of the author.
 
-This disclosure describes four independent invention families. Each independent claim stands alone without requiring the others. Dependent claims within each family add specificity and narrow the implementation space.
+This disclosure describes eight independent invention families. Each independent claim stands alone without requiring the others. Dependent claims within each family add specificity and narrow the implementation space.
 
 ### Prior art context
 
@@ -16,7 +16,29 @@ This disclosure describes four independent invention families. Each independent 
 
 ---
 
-## Claim I. Embodied Interaction System from a Single RGB Camera
+## Claim I. Application Metadata Transport via Ghost Mode Encoding in LBM Simulations
+
+A method for encoding arbitrary application-layer metadata into the non-physical degrees of freedom ("ghost modes") of a Lattice Boltzmann fluid simulation, such that the metadata advects, diffuses, and mixes with the fluid automatically, without additional memory, computation, or bandwidth. This technique applies to any LBM lattice and any application requiring per-cell metadata that moves with a simulated fluid, including but not limited to interactive games, scientific visualization, industrial simulation, multi-material flow modeling, or any other context in which metadata must advect with the flow. No prior art is known for using LBM ghost modes as a general-purpose metadata transport mechanism as of the date of this disclosure.
+
+In the D3Q19 LBM formulation, 19 distribution values encode 19 degrees of freedom, but a 3D fluid has only 10 independent physical quantities (1 density, 3 momentum, 6 stress tensor components). The remaining 9 degrees of freedom are "ghost modes," mathematical artifacts of the lattice geometry that are orthogonal to all physical quantities by construction (Lallemand & Luo, 2000; d'Humieres et al., 2002). In conventional LBM, ghost modes serve only as numerical dampers, absorbing non-physical energy during violent flow events. Published LBM literature treats ghost modes exclusively as numerical artifacts to be damped. Existing approaches to metadata transport in fluid simulations, including tracer particles, passive scalar transport, level set methods, and multi-component LBM models, all require additional memory, additional computation, or both. Ghost mode encoding is unique in using already-computed, already-transported values that are mathematically guaranteed to not affect the physics.
+
+Application-layer metadata, including but not limited to material identity, temperature, ownership or provenance, damage accumulation, lifecycle state, moisture content, chemical state, angular momentum, and control flags, may be encoded into the ghost mode components of the moment-space representation. Because ghost modes are orthogonal to all physical modes by linear-algebraic construction, the encoded metadata cannot affect density, momentum, or stress. This is a mathematical guarantee, not an empirical observation.
+
+The encoding may be performed as follows: after transforming distributions to moment space via the standard MRT transformation matrix (m = M * f), ghost moments (for example m[11] through m[19] in D3Q19) may be overwritten with encoded metadata values. Ghost relaxation rates may be set to zero (preserving injected values through collision) or to small values (allowing controlled diffusion at material boundaries). After streaming, the metadata may be recovered by transforming the received distributions back to moment space and reading the ghost components. The metadata advects with the fluid during streaming and mixes naturally at boundaries during collision, with no separate advection pass, no interpolation scheme, and no mass correction required.
+
+The stability function previously provided by ghost mode damping may be replaced by explicit energy limiting during collision, using available arithmetic headroom within the integer accumulator. For example, integer LBM may provide measured headroom of 862x within 32-bit integers, providing computational budget for multi-stage damping filters computed in-place during collision.
+
+The complete per-tick workflow may proceed as follows within a single compute dispatch: (1) transform distributions to moment space (m = M * f), (2) identify physical moments (for example m[1] through m[10]) which are not modified by the metadata system, (3) identify ghost moments (for example m[11] through m[19]) which may contain residual non-physical energy from the previous tick, (4) explicitly damp any accumulated ghost noise using arithmetic headroom (for example multi-stage energy limiting filters computed in-place), (5) inject application metadata by overwriting the damped ghost moments with encoded values, (6) relax physical modes via normal BGK or MRT collision, (7) transform back to distribution space (f = M_inv * m), and (8) pack and stream distributions to neighbors, with ghost-encoded metadata riding within the same packed words. All eight steps may execute within a single GPU compute dispatch.
+
+This encoding eliminates the following from the simulation pipeline: separate material advection passes (for example 1 full grid read/write per tick per metadata field), material interpolation with heaviest-corner lookup (per-cell branching and neighbor reads), post-advection mass correction passes, and separate metadata storage buffers. The metadata occupies bits within the existing distribution storage, requires zero additional memory, zero additional computation, and zero additional bandwidth. At for example 4.7 million cells, each eliminated grid pass may save approximately 0.5-1.0 ms on GPU.
+
+The number of available ghost modes varies by lattice: D2Q9 may provide 5 ghost modes, D3Q15 may provide 5, D3Q19 may provide 9, and D3Q27 may provide 17. Higher-order lattices provide more metadata capacity. Each ghost mode may carry approximately 10 bits of metadata in an integer representation, for a total of for example 90 bits of flowing metadata per cell in D3Q19.
+
+Because LBM streaming mixes neighboring distributions proportionally, ghost-encoded metadata naturally produces continuous spatial gradients at material boundaries. For example, a cell at the boundary between two materials (for example fire and water) may carry a ghost-encoded material identity that is a fractional blend of both materials, representing the interface as a continuous gradient rather than a discrete boundary. This eliminates the need for level set methods, volume-of-fluid tracking, or interface reconstruction algorithms. The gradient may be used for rendering (smooth texture and color blending at material transitions), for interaction (damage and reactions propagate across a gradient zone rather than at a single cell boundary), and for physics (the fractional material identity may index into an interaction table to determine reaction behavior at the interface). Free spatial gradients at every material boundary in the simulation are a natural consequence of the ghost mode transport, requiring no additional computation.
+
+---
+
+## Claim II. Embodied Interaction System from a Single RGB Camera
 
 A unified real-time system in which GPU-accelerated (for example via WebGPU compute shaders) machine learning (ML) inference extracts one or more of head position, hand landmarks, or other body-relative spatial signals from a single consumer camera feed, including but not limited to a built-in webcam, and uses these signals to drive one or more interactive modalities including head-coupled visual parallax, bilateral hand tracking with derived depth, or other vision-derived interaction, all running concurrently in an unmodified browser tab or comparable client-side runtime on commodity hardware. Conventional six-degrees-of-freedom (6DOF) VR requires either a headset with onboard tracking cameras, an external depth sensor, or a multi-camera rig. This system synthesizes equivalent interaction from signals already present in a single RGB stream, including but not limited to a consumer webcam. No prior system is known to combine these elements in this configuration as of the date of this disclosure.
 
@@ -24,7 +46,7 @@ In one embodiment, the head-coupled parallax pipeline provides three translation
 
 GPU-accelerated inference at interactive frame rates (for example 120fps or higher) driving one or more of head-coupled parallax, hand tracking, depth estimation, or other vision-derived interaction modalities, running concurrently in a browser tab or comparable client-side runtime, may produce a first-person interactive 3D experience requiring no hardware beyond the camera built into any modern laptop or similar consumer device.
 
-### I.A. Head-Coupled Visual Parallax with Concurrent Hand Gesture Input
+### II.A. Head-Coupled Visual Parallax with Concurrent Hand Gesture Input
 
 A single RGB camera feed (for example via `getUserMedia` or another video capture API) is shared between two or more concurrent ML inference pipelines (where "inference" refers to the process of running a trained neural network on camera frames to produce spatial predictions such as landmark coordinates) running in separate execution contexts, such as Web Workers, threads, or processes. Face detection extracts head position from facial keypoints, including but not limited to eye landmarks (for example, midpoint for x/y, inter-eye distance for z depth proxy). Hand landmark detection extracts 3D landmarks (for example 21 per hand per frame) for gesture recognition. Inference contexts may receive video frames via zero-copy transfer mechanisms such as `ImageBitmap` via `postMessage`, shared memory, or other efficient frame-sharing approaches. ML inference may run partially or entirely off the main rendering thread, preserving smooth interactive rendering at rates including 120fps or higher.
 
@@ -32,21 +54,21 @@ The 3D scene (rendered using any suitable 3D engine, such as Three.js, WebGL, We
 
 The specific combination of one or more vision-derived interactive modalities, including but not limited to head-coupled parallax rendering and hand gesture input, driven by concurrent off-thread ML inference from a single consumer RGB camera, running entirely in a client-side runtime such as a browser without plugins or depth sensors, is a novel system architecture as of the date of this disclosure.
 
-### I.B. Head Position as 3D Gameplay Input
+### II.B. Head Position as 3D Gameplay Input
 
 The same head position signal that drives parallax camera translation may simultaneously serve as the player's spatial position within the 3D game world. The player's tracked head position may map to a player hitbox, avatar position, or other spatial representation in the scene, such that physical head movement produces corresponding movement in game space. For example, physically leaning left may move the player's position out of the path of an incoming projectile, leaning back may increase distance from an approaching threat, and leaning forward may close distance for a melee interaction. The head-driven game position and the head-driven parallax view may update from the same tracking signal, producing a unified experience in which the player sees the scene shift and simultaneously occupies a different position within it. This enables physical dodging, weaving, and spatial positioning as gameplay mechanics, driven entirely by natural body movement with no controller input. The player may be anchored to a fixed viewpoint and interact by leaning within the parallax window, or the player may move through the 3D space via any navigation mechanism, including but not limited to gesture-driven locomotion, gaze-directed movement, head-lean-to-walk, or other input mappings. The system supports both stationary and traversal interaction models.
 
-### I.C. Parallax-Coupled Hand Gesture Coordinate System
+### II.C. Parallax-Coupled Hand Gesture Coordinate System
 
 Hand landmarks may be mapped to 3D scene space relative to the current parallax camera position. In this embodiment, the hand may ride with the head-coupled perspective shift. Most systems treat hand position and head tracking as independent coordinate systems. Coupling them makes the hand feel like it exists inside the parallax window rather than floating in front of it. This effect is central to producing coherent first-person interaction in a head-coupled parallax scene. Applying the same smoothing filter (for example a One Euro filter with matched parameters) to both the hand tracking and head tracking signals may preserve temporal coherence between the two coordinate systems, ensuring that smoothing-induced latency affects both signals equally and the coupled mapping remains aligned.
 
-### I.D. Depth-Corrected Hand Projection for Desktop VR Interactions
+### II.D. Depth-Corrected Hand Projection for Desktop VR Interactions
 
 Within the coupled coordinate system of I.C, hand landmark models, including but not limited to MediaPipe, may produce per-landmark z-values inferred from hand scale and proportions that describe depth within a scene. By mapping one or more depth values into the head-coupled parallax scene with an inverse projection correction, a hand physically moving toward the camera may be rendered as moving into the 3D scene rather than growing larger on a flat screen. Depth values may optionally be smoothed prior to mapping (for example via a One Euro filter or other adaptive low-pass filter) to reduce noise, but the core technique is the inverse projection mapping itself. This counteracts the natural 2D projection (where closer objects appear larger) and produces spatially coherent hand movement within the parallax space. For example, a punch toward the webcam reads as a punch into the screen.
 
 The depth mapping may use smoothed absolute z-position, relative z-velocity (z-delta), or a combination of both, depending on the interaction type. For example, smoothed position may provide stable continuous placement for aiming and spatial interaction, while z-velocity derivatives may be used for momentum-dependent interactions such as throwing or striking. This enables desktop VR style interactions, including for example boxing, tennis, or other gesture-driven spatial interactions, from a single consumer webcam, without a depth sensor or headset.
 
-### I.E. Stability-Aware Landmark Estimation
+### II.E. Stability-Aware Landmark Estimation
 
 The landmark depth signal may degrade when landmarks are occluded or the hand partially exits the frame. A stability-aware selection mechanism, such as a visibility-weighted cascade, may select one or more anchor points based on stability criteria at each frame. On anchor transitions, the system may apply computed offsets or other continuity-preserving corrections to maintain positional continuity across any axis, including but not limited to depth (Z), lateral position (X, Y), or combinations thereof. More generally, the position of less stable landmarks may be estimated or constrained based on the positions of more stable landmarks, enabling the system to infer the likely location of degraded points from reliable ones. Together, these mechanisms may maintain continuous tracking even as the hand moves toward the edges of the camera's field of view. In aiming applications, for example, a finger pointed toward the camera foreshortens in the image, collapsing distal landmarks into a small cluster and degrading positional estimation precisely when accurate aim tracking is most needed. When such distal landmarks drop below a confidence threshold, the system may fall back to more proximal landmarks such as the wrist or palm base while preserving the last known positional estimates, maintaining continuous aim ray stability through high-uncertainty poses.
 
@@ -54,7 +76,7 @@ The estimation of degraded landmark positions may additionally incorporate tempo
 
 This prediction and correction process may alternatively or additionally be provided as input to a secondary machine learning model trained to estimate corrected landmark positions from noisy or degraded inputs, using stable landmark positions, velocity histories, and confidence scores as features. Such a model may be trained on-device or pre-trained, and may operate as a post-processing stage within the tracking pipeline, providing learned landmark stabilization that adapts to patterns of degradation specific to the interaction context.
 
-### I.F. Head-Coupled Aim via Multi-Point Spatial Mapping
+### II.F. Head-Coupled Aim via Multi-Point Spatial Mapping
 
 In a head-coupled parallax scene, the apparent aim vector of a pointed finger changes as the viewer's head moves, because the ray from the viewer's eye through the fingertip originates from a different viewpoint. Leaning right shifts both the viewing origin and the viewing angle, and a finger pointed at a fixed screen location now traces a ray to a different point in 3D scene space. This system may derive a screen-space aim point, and optionally a continuous world-space aim vector, from the geometric relationship between tracked head position and tracked fingertip position, such that the aim output may update in real time as the head and/or hand move. The effect is analogous to physically looking through an aim scope: the viewer leans to align their perspective, and the system tracks where their finger points on the flat screen and may derive from this where they are actually aiming in the 3D scene. The resulting aim output may drive downstream interactions including but not limited to cursor movement, target selection, the rendering of a visible aim indicator such as a crosshair or projected ray, or any other interaction driven by a spatially derived vector.
 
@@ -66,7 +88,7 @@ The regression output passes through a cascade of smoothing filters with tunable
 
 The calibration mechanic uses the same gesture and tracking pipeline that drives all other system interactions. No additional hardware, no separate calibration device, no page reload. The system calibrates itself using its own input modality, and the resulting aim ray is continuously updated from both head and hand position, producing a world-space interaction ray that responds to physical viewing angle the way a real aimed instrument would.
 
-### I.G. Eye-Gaze Tracking and Gaze-Driven Interaction from Facial Landmarks
+### II.G. Eye-Gaze Tracking and Gaze-Driven Interaction from Facial Landmarks
 
 The face landmark model used for head-coupled parallax may additionally produce eye landmark positions from which gaze direction can be derived, including but not limited to iris center position, eye corner positions, or other ocular landmarks. By tracking the position and orientation of the eyes relative to the head, the system may estimate where on the screen or within the 3D scene the user is looking, providing a gaze signal at no additional sensing cost beyond the existing face tracking pipeline.
 
@@ -80,7 +102,7 @@ The estimated gaze direction may additionally be fed back into the head-coupled 
 
 The combination of head-driven camera translation and gaze-driven camera adjustment may produce up to six degrees of freedom from a single webcam: three translational axes from head position and up to three rotational or translational axes from gaze direction, without a headset or additional sensors. The intensity of gaze-coupled camera adjustment may be user-tunable or adaptive, ranging from imperceptible depth enhancement to full gaze-directed look control. Smoothing of the transformations applied via these signals may or may not be applied, depending on the desired responsiveness and perceptual effect.
 
-### I.H. Physiological Viewport Modulation from Facial State
+### II.H. Physiological Viewport Modulation from Facial State
 
 The face landmark pipeline described in this disclosure produces blendshape coefficients that encode the state of the user's eyelids, brow, and other facial features in real time. These signals, including but not limited to eyelid closure (for example eyeBlinkLeft, eyeBlinkRight), squint intensity (for example eyeSquintLeft, eyeSquintRight), and brow position, may be used to modulate the player's own viewport rather than, or in addition to, driving avatar animation.
 
@@ -90,11 +112,11 @@ Detected facial states may additionally drive gameplay mechanics. For example, a
 
 More generally, any detected facial state may be mapped to a corresponding viewport modification, including but not limited to: vignette intensity modulated by eyelid closure, color temperature or saturation shifts driven by brow tension or other expressions of affect, depth-of-field adjustments driven by squint or focus indicators, or any other visual post-processing effect driven by real-time facial state. The facial signals are already present in the tracking pipeline at no additional sensing cost. This approach extends the embodiment chain established by head-coupled parallax (Claim I), gaze tracking (I.G), and spatial audio (I.M) into a further modality: the player's own face modulates their visual experience of the scene.
 
-### I.I. Fused Monocular Depth from Orthogonal Cues
+### II.I. Fused Monocular Depth from Orthogonal Cues
 
 In a system already tracking both head position and hand position from a single camera for parallax and gesture input, the geometric relationship between these two tracked points provides a second depth cue at zero additional sensing cost. As the user's head shifts, the angular relationship between head and hand in camera space changes as a function of true 3D distance, encoding geometric depth independent of the landmark depth signal. Fusing both signals, for example using confidence weighting, may produce depth estimates that are robust when either signal is noisy or degraded. The system's existing dual-tracking architecture produces orthogonal depth cues as a byproduct of its primary functions, requiring no additional sensor, model, or pipeline stage. More generally, this approach encompasses any technique that fuses two or more monocular depth cues already present in the system to produce a combined depth estimate. Such cues may include but are not limited to landmark spread, face-relative angular geometry, apparent size, or other camera-derived signals.
 
-### I.J. Real-Time Facial Animation with Geometry-Driven Lip Synchronization
+### II.J. Real-Time Facial Animation with Geometry-Driven Lip Synchronization
 
 A dedicated blendshape inference model running on a selected subset of face landmarks (for example 146 landmarks) produces a set of blendshape coefficients compatible with a standard blendshape convention (for example 52 ARKit-compatible coefficients) at the tracking frame rate. These coefficients drive morph target deformation on any 3D character mesh rigged with the corresponding blendshape targets, enabling real-time facial puppeting of stylized avatars from webcam input alone. The blendshape inference worker runs fire-and-forget with one frame of latency, adding no fps overhead to the tracking pipeline.
 
@@ -104,7 +126,7 @@ In audio-corroborated lip sync, geometry-driven mouth coefficients are cross-ref
 
 The geometry-driven approach is a key differentiator from existing VTubing and avatar animation software, which typically drives jawOpen or equivalent mouth parameters from audio amplitude alone. This system derives multiple distinct mouth blendshape coefficients (for example 12 or more) from real facial geometry, capturing lip shape, jaw position, and mouth configuration independently of whether the user is speaking.
 
-### I.K. Compact Networked Player State for Browser-Based Facial Presence
+### II.K. Compact Networked Player State for Browser-Based Facial Presence
 
 Browser-based multiplayer games typically lack facial presence: the real-time representation of a player's facial expressions, head movement, and lip articulation on a remote player's screen. Players are instead represented by usernames, static avatars, or at most voice chat. Real-time facial animation has historically required dedicated hardware such as VR headsets with face tracking sensors, professional motion capture rigs, or bandwidth-intensive video streams, and is therefore rarely available in browser-based interactive contexts.
 
@@ -116,7 +138,7 @@ Benchmarked on identical hardware (see Claim II.A), the leading browser-based fr
 
 As of the date of this disclosure, no known browser-based system uses WebGPU-accelerated inference to produce real-time blendshape coefficients for networked facial presence. The result is that full avatar facial presence, traditionally reserved for VR or studio environments, becomes a byproduct of the existing tracking pipeline rather than an additional system.
 
-### I.L. Mobile Device as 6DOF Interactive Platform
+### II.L. Mobile Device as 6DOF Interactive Platform
 
 The GPU-accelerated inference pipeline, gesture classification system, and deterministic simulation architecture described in this document are not limited to desktop or laptop environments. Mobile devices with front-facing cameras and browser-based GPU compute capability (for example via WebGPU in a mobile browser) may serve as equivalent platforms for the entire system, requiring no native app installation. The browser Fullscreen API (supported on iOS Safari as of iOS 26 and Android Chrome) may remove all browser chrome, producing a fullscreen interactive experience indistinguishable from a native application. The front-facing camera of a mobile device provides the same single RGB input that drives head-coupled parallax, face tracking, and hand landmark detection on desktop.
 
@@ -132,7 +154,7 @@ The result is that the complete system, including head tracking, hand gesture cl
 
 *The following spatial audio technique (I.M) extends the embodied interaction system into the auditory domain. By deriving audio listener position from the same face-tracking pipeline that drives visual parallax, the system may produce correlated audiovisual responses to physical movement that deepen the illusion of spatial presence without requiring any additional sensing hardware or input.*
 
-### I.M. Translational 6DOF Spatial Audio from Monocular Head Tracking
+### II.M. Translational 6DOF Spatial Audio from Monocular Head Tracking
 
 The same face-tracking data that drives head-coupled visual parallax may simultaneously drive a spatial audio listener position, for example via the Web Audio API AudioListener or any equivalent spatial audio system. Each frame, the listener coordinates may be set from the parallax camera position, which is itself derived from webcam-tracked facial features such as eye midpoint and inter-eye distance. When the user physically leans left, both the visual perspective and the audio perspective may shift together: audio sources pan compensatorily rightward, remaining world-locked in the 3D scene rather than fixed to the listener's head. This approach couples two normally independent output modalities, visual parallax and spatial audio, from a single face-tracking pipeline in real time.
 
@@ -140,7 +162,7 @@ Because the listener position updates with physical head movement, additional pe
 
 The combination of head-tracked panning, Doppler shift, and spectral unmasking, all driven by the same head-tracked listener position, may produce correlated changes across four or more perceptual dimensions simultaneously, including visual position, binaural pan, pitch, timbre, and spectral mass, from a single face-tracking pipeline.
 
-### I.N. Summary-Driven Spatial Audio from Simulation State
+### II.N. Summary-Driven Spatial Audio from Simulation State
 
 In scenes containing dozens, hundreds, or thousands of localized sound-producing events (for example elemental interactions across a voxel simulation grid), instantiating a discrete audio source per event may exceed the practical limits of the audio processing system. This disclosure describes an alternative approach in which spatial audio may be generated from summary statistics of the simulation state rather than from individual point sources.
 
@@ -154,7 +176,7 @@ The result is that a scene with many localized sound-producing events may be aud
 
 ---
 
-## Claim II. Zero-Readback GPU-Accelerated ML Pipeline for Real-Time Vision
+## Claim III. Zero-Readback GPU-Accelerated ML Pipeline for Real-Time Vision
 
 A pipeline for deploying multi-stage ML vision models to GPU compute in a client-side runtime, in which model inference, inter-stage preprocessing, and intermediate data transfer remain GPU-resident, with only final outputs (for example landmark coordinates) crossing the GPU-CPU boundary. The pipeline encompasses model extraction from sealed upstream frameworks, conversion to a portable format (for example ONNX), execution via GPU compute shaders (for example WebGPU) in parallel off-thread execution contexts (for example Web Workers), and GPU-resident preprocessing between detection stages. As of the date of this disclosure, no other known system uses the pipeline architecture described herein, specifically WebGPU compute shaders with zero inter-stage CPU readback and parallel off-thread execution, to drive real-time vision tracking for interactive applications in a browser.
 
@@ -180,7 +202,7 @@ Independently, head-coupled parallax is particularly sensitive to tracking laten
 
 Prior browser-based ML vision frameworks force an irreconcilable tradeoff between these two requirements due to architectural constraints in their threading and GPU access models (see II.A). The leading framework operating on the main thread achieves approximately 59fps, within the documented sickness-risk zone, while achieving low tracking latency. Moved to a Web Worker, the same framework achieves 120fps but at 53ms tracking latency, well above the perceptual fusion threshold. The disclosed pipeline achieves both 120fps rendering and approximately 10ms tracking latency simultaneously, where the leading framework can achieve either smooth framerate or low latency but not both (see II.A for detailed conditions and three-way comparison).
 
-### II.A. Elimination of the Framerate-Latency Tradeoff in Browser-Based Vision Pipelines
+### III.A. Elimination of the Framerate-Latency Tradeoff in Browser-Based Vision Pipelines
 
 In benchmarking prior browser-based ML vision frameworks, including sealed WASM-based inference binaries that advertise GPU acceleration, a consistent tradeoff between rendering framerate and tracking latency was observed across all configurations tested. Investigation of the underlying architecture revealed that this tradeoff arises from the interaction between browser threading constraints, WebGL context binding, and pixel data serialization, and is structural rather than tunable.
 
@@ -214,11 +236,11 @@ The prior framework's throughput degrades linearly with each added task because 
 
 The disclosed pipeline resolves the tradeoff by running inference directly on the GPU via WebGPU compute shaders, without crossing thread boundaries for pixel data. GPU buffer objects written by one stage are passed directly to the next via zero-copy references (for example via Tensor.fromGpuBuffer()), without returning to CPU. This eliminates the ImageBitmap creation, cross-thread postMessage serialization, and WASM/WebGL context overhead present in prior approaches. The only CPU readback in the complete pipeline is the final landmark output (measured at 252 bytes per hand and 5.7KB per face per frame in the benchmarked configuration). The result is 5.2x lower latency than the worker path and 2x lower than main-thread inference, while maintaining 120fps rendering throughout.
 
-### II.B. GPU-Side Preprocessing Between Detection Stages
+### III.B. GPU-Side Preprocessing Between Detection Stages
 
 While II.A addresses the readback bottleneck during inference itself, a separate source of CPU-GPU roundtrips exists in the preprocessing steps between inference stages. Even a pipeline with zero-readback inference may still bounce data through the CPU for preprocessing, negating the latency gains. Standard browser vision pipelines perform preprocessing steps such as letterbox padding and affine warping by routing image data through CPU-accessible surfaces such as Canvas between detection stages. This CPU-GPU-CPU roundtrip may dominate preprocessing latency in multi-stage pipelines even when inference itself is fast. In the disclosed pipeline, these preprocessing steps may be performed entirely via GPU compute shaders or equivalent GPU-side operations, keeping image data GPU-resident between stages such as palm detection and landmark inference. The preprocessed tensor may be passed directly to the next inference stage via zero-copy GPU buffer reference or equivalent mechanism, consistent with the pipeline architecture described in II.A. Combined with II.A, this ensures that image data entering the pipeline from the camera never leaves the GPU until final landmark output.
 
-### II.C. Complementary Kernel Fusion as Workaround for WebGPU Serial Dispatch
+### III.C. Complementary Kernel Fusion as Workaround for WebGPU Serial Dispatch
 
 WebGPU's underlying browser implementations (for example the Dawn backend used in Chromium-based browsers) hardcode serial GPU dispatch, preventing async compute and multi-queue execution. This is not a missing feature that may be added in a future release; it is an architectural constraint in the Metal command buffer implementation (for example MTLDispatchTypeSerial in Dawn's CommandBufferMTL.mm). Every WebGPU application in every browser is limited to executing GPU compute dispatches sequentially. Native GPU APIs such as Vulkan and Direct3D 12 overcome this limitation via multi-queue async compute, allowing independent workloads to overlap on the GPU. This path is unavailable in WebGPU.
 
@@ -234,7 +256,7 @@ More generally, this technique may apply to any pair of GPU operations where one
 
 Kernel fusion does not apply uniformly. Operations that are both ALU-bound (for example ML inference layers, which achieve high arithmetic intensity) do not benefit because there are no memory stall gaps to fill. The appropriate architectural strategy may vary by workload: kernel fusion for complementary stall patterns, Web Worker parallelism for CPU-side concurrency (as described in Claim II), or sequential execution where data dependencies require it. As of the date of this disclosure, this is the first documented application of complementary kernel fusion as a workaround for WebGPU's lack of async compute.
 
-### II.D. Multi-Device GPU Overlap via Separate Adapter Handles
+### III.D. Multi-Device GPU Overlap via Separate Adapter Handles
 
 WebGPU's device model consumes the adapter handle on first device creation, preventing multiple devices from sharing a single adapter. By requesting separate adapters via multiple calls to navigator.gpu.requestAdapter() and creating independent GPU devices from each, the system may achieve measurable GPU work overlap when the workloads target different GPU functional units. For example, a texture-sampling workload on one device and a memory-copy workload on another device may overlap via the hardware's wavefront scheduler because they contend for different resources.
 
@@ -242,36 +264,36 @@ Benchmarked on identical hardware (Apple M1, Chrome, WebGPU, 2026-04-04): comput
 
 This technique complements the kernel fusion approach of II.C: fusion is preferred when workloads have complementary stall patterns within a single dispatch, while multi-device overlap may be preferred when workloads are independently schedulable and target different GPU functional units. Both techniques work within WebGPU's serial dispatch constraint.
 
-### II.E. Op Decomposition for GPU Runtime Compatibility
+### III.E. Op Decomposition for GPU Runtime Compatibility
 
 When a GPU-based ML runtime lacks a native kernel for a given operation, the runtime falls back to CPU execution, pulling data off the GPU, computing on the CPU, and pushing it back. This disclosure describes a pre-deployment graph transformation that decomposes unsupported operations into compositions of GPU-native ops using equivalent mathematical identities, such that every operation in the modified graph has a native GPU implementation and no CPU fallback is triggered. The result is zero CPU-GPU roundtrips for the decomposed operations, zero accuracy loss, and full GPU inference speed recovered.
 
 This technique applies to any neural network model containing ops unsupported by a target runtime and is not limited to any single operation or model type. For example, ONNX (Open Neural Network Exchange) is a portable model format that enables models trained in one framework to be executed in another runtime; models converted to ONNX may be executed on WebGPU via runtimes such as ONNX Runtime Web, but may encounter unsupported ops in the target runtime's GPU execution provider. Any unsupported op that can be expressed as a mathematically equivalent composition of supported primitives may be decomposed in this manner. For browser-based ML and other environments where runtime op coverage lags behind native frameworks, this is a practical path to deploying models that would otherwise be GPU-unusable, keeping the entire inference pipeline on the GPU.
 
-### II.F. PReLU Decomposition for WebGPU Execution
+### III.F. PReLU Decomposition for WebGPU Execution
 
 As a specific application of II.E, a neural network model may contain multiple instances of an unsupported activation function, each of which independently triggers a GPU-to-CPU fallback. For example, in one embodiment, a widely deployed face landmark model contains 69 PReLU layers, each triggering a CPU fallback when executed via a WebGPU-based inference runtime, reducing throughput to approximately 9fps (110ms per frame) despite all other operators executing on GPU. Decomposing each instance of the unsupported operation into a composition of GPU-native ops using the method of II.E eliminates all such fallbacks, recovering full GPU inference speed. The source model may originate from any upstream framework (for example extracted from a sealed task bundle and converted from TFLite to ONNX via format conversion tools such as tf2onnx), and the decomposition may be applied to any activation function or other operation type that lacks native GPU kernel support in the target runtime. Without this transformation, the face landmark model used for head-coupled parallax and lip synchronization in Claims I.A and I.J would be unable to run at interactive frame rates on WebGPU, and the perceptual coherence thresholds described in Claim II would not be met.
 
 ---
 
-## Claim III. In-Browser GPU-Accelerated Gesture Model Training and Real-Time Deployment
+## Claim IV. In-Browser GPU-Accelerated Gesture Model Training and Real-Time Deployment
 
 A system for defining, training, and deploying recognition models for gestures and poses derived from body-relative landmarks, including but not limited to hand gestures, body poses, facial expressions, or other landmark-based inputs, entirely within a client-side runtime such as a browser, with no server dependency for any stage of the training or inference pipeline. The complete training pipeline — feature extraction, forward pass, loss computation, gradient accumulation, and weight update — executes on the client GPU via compute shaders. The trained model is available for real-time inference within the same session at interactive frame rates. No data leaves the client device during training or inference unless explicitly transmitted by the application.
 
-### III.A. Derived Geometric Feature Families
+### IV.A. Derived Geometric Feature Families
 
 Raw hand landmark coordinates from a single RGB camera vary with hand size, camera distance, hand position within the frame, and individual anatomy, making them unsuitable as direct classifier input without normalization. Transforming raw coordinates into derived geometric features produces a representation that is stable across these sources of variation, enabling a classifier trained on one user's hands to generalize across sessions, distances, and camera positions.
 
 Hand landmark coordinates may be transformed into a computed geometric feature vector combining multiple orthogonal feature families, including but not limited to: inter-fingertip contact distances (for example 10 features from all pairwise fingertip combinations), thumb-to-joint distances for relative finger positioning (for example 12 features), per-joint flexion angles measuring curl at each knuckle (for example 15 features), inter-finger spread angles (for example 4 features), palm openness as a scalar (for example 1 feature), and camera-relative palm orientation angles (for example 3 features). Shape features are normalized by palm size for scale invariance and computed relative to the hand's own geometry for rotation invariance, while orientation features preserve camera-relative direction to distinguish poses that differ only in palm facing direction, such as poses as subtle as ASL signs U and H, or P and K.
 The resulting feature vector (for example 45 features in one configuration) serves as input to a classifier, such as a multilayer perceptron or other suitable model, trained to map specific hand poses to discrete trigger events, including for example casting a spell, activating an ability, or selecting an action. 
 
-### III.B. Atomic Float Gradient Accumulation for On-Device GPU Training
+### IV.B. Atomic Float Gradient Accumulation for On-Device GPU Training
 
 GPU-based gesture training may use an atomic accumulation technique to accumulate gradients from all training samples in parallel into a single weight-sized buffer. Specifically, WGSL provides atomic operations only on 32-bit unsigned integers. Float gradient accumulation is achieved by reinterpreting float values as unsigned integers via bitcast, performing an atomic compare-and-swap loop (atomicCompareExchangeWeak), and bitcasting back. This enables all training samples to accumulate gradients into a single shared weight buffer in parallel, without per-sample gradient storage.
 
 Standard GPU training allocates per-sample gradient arrays and then reduces them in a second pass. This approach requires memory proportional to the number of weights only (for example 111KB for a 27,776-weight classifier), rather than proportional to the number of training samples multiplied by the number of weights (for example 1.3GB for 13,000 training samples under full-batch gradient descent, or 27MB under mini-batch). This represents a memory reduction of over four orders of magnitude for typical gesture training workloads, making real-time on-device gesture model training practical in a browser tab or comparable client-side runtime.
 
-### III.C. ML Recognition Confidence as Continuous Visible Gameplay Variable
+### IV.C. ML Recognition Confidence as Continuous Visible Gameplay Variable
 
 In gesture-driven interactive systems, the recognition confidence score produced by an ML model or other classification system may be exposed as a continuous, real-time visible gameplay variable rather than consumed silently as a binary accept/reject threshold. In one implementation, gesture recognition confidence drives in-game quantities such as spell intensity, shield strength, or ability power, giving the player direct real-time feedback on physical input quality and creating a closed-loop skill acquisition system driven by the model's output.
 
@@ -285,29 +307,29 @@ In a language acquisition context, for example American Sign Language, the same 
 
 ---
 
-## Claim IV. Packed Integer Lattice Boltzmann Fluid Simulation
+## Claim V. Packed Integer Lattice Boltzmann Fluid Simulation
 
 A method for performing Lattice Boltzmann Method (LBM) fluid simulation using packed fixed-point integer representations, in which distribution values are stored at sub-word precision (for example 10 bits per distribution) and multiple distributions are packed into single native machine words (for example 3 distributions per 32-bit word). This approach achieves a measured 8.3x performance improvement and 2.7x memory reduction over conventional floating-point LBM implementations on GPU hardware, with 0.000% mass drift over arbitrary simulation lengths.
 
 Conventional LBM implementations store each distribution as a 32-bit or 64-bit floating-point number. Floating-point values cannot be meaningfully packed into sub-word bit fields, because their exponent-mantissa encoding does not support bitwise extraction of individual values from a shared word. The integer representation is the prerequisite that enables the packing, and the packing is what delivers the bandwidth reduction that makes real-time interactive LBM feasible at millions of cells.
 
-### IV.A. Integer-Only LBM with Mass-Corrected Equilibrium
+### V.A. Integer-Only LBM with Mass-Corrected Equilibrium
 
 The simulation may operate entirely in integer arithmetic using fixed-point distribution values (for example 10-bit, range 0-1023) stored in unsigned 32-bit integers. A mass-corrected equilibrium scheme may ensure exact mass conservation: the rest population (for example q=0 in D3Q19) may be defined as total density minus the sum of all other populations, absorbing all integer truncation error into a single population that is not streamed. This achieves measured 0.000% mass drift over arbitrary simulation lengths, a guarantee that floating-point LBM cannot provide due to accumulated rounding error.
 
-### IV.B. Sub-Word Packing of LBM Distributions
+### V.B. Sub-Word Packing of LBM Distributions
 
 Multiple distribution values may be packed into a single native machine word using bit shifting and masking (for example three 10-bit values per 32-bit word). For a D3Q19 lattice, 19 distributions may be stored in 7 packed words (28 bytes) instead of 19 individual words (76 bytes), a 2.7x storage reduction per cell. Distributions may be unpacked into registers for collision arithmetic and repacked for storage, with the pack/unpack cost being negligible register-level operations compared to the memory bandwidth savings.
 
 This packing format is not achievable with floating-point representations, because the exponent-mantissa encoding of IEEE 754 floats does not permit meaningful sub-word extraction via bitwise operations. The integer representation is the enabling prerequisite.
 
-### IV.C. Fused Gather-Based Collision and Streaming
+### V.C. Fused Gather-Based Collision and Streaming
 
 Conventional LBM streaming uses a scatter pattern: each thread reads its own cell's distributions and writes them to neighboring cells, creating write conflicts requiring atomic operations or serialization. The disclosed method may use a gather pattern: each thread reads distributions from source neighbors and writes only to its own cell, eliminating write conflicts entirely.
 
 Combined with the packed storage of IV.B, a single GPU compute dispatch may perform the complete LBM tick: for each velocity direction, compute the source neighbor coordinates, read the packed word containing the needed distribution from the source cell, unpack the specific value, perform BGK collision on all unpacked values in registers, pack the post-collision values, and write the packed words to the output buffer. This fuses collision and streaming into one dispatch, eliminating an intermediate buffer and a full grid read/write cycle.
 
-### IV.D. Benchmarked Performance
+### V.D. Benchmarked Performance
 
 Benchmarked on Apple GPU (Metal backend via WebGPU), grid 192x128x192 (4,718,592 cells):
 
@@ -320,33 +342,13 @@ Benchmarked on Apple GPU (Metal backend via WebGPU), grid 192x128x192 (4,718,592
 
 At 0.98 ms per physics tick, a 120fps application may execute 8 physics sub-ticks per rendered frame, enabling high-fidelity turbulence simulation in real-time interactive applications.
 
-### IV.E. Deterministic Cross-Hardware Reproducibility
+### V.E. Deterministic Cross-Hardware Reproducibility
 
 The integer-only arithmetic guarantees bit-identical results across different GPU hardware, operating systems, and browsers. Floating-point LBM cannot provide this guarantee due to vendor-specific rounding behavior, instruction reordering, and fused multiply-add variations. This property enables the deterministic multiplayer architecture described in Claim VI.
 
-### IV.F. Applicability to Other Lattice Configurations
+### V.F. Applicability to Other Lattice Configurations
 
 The method may apply to any LBM lattice where distribution values fit in fewer bits than the native machine word, including but not limited to D2Q9 (9 distributions), D3Q15 (15 distributions), D3Q19 (19 distributions), or D3Q27 (27 distributions). Higher packing ratios may be achievable with narrower distributions (for example 8-bit values, 4 per word). The gather-streaming pattern may apply independently of packing.
-
-### IV.G. Application Metadata Transport via Ghost Mode Encoding in LBM Simulations
-
-In the D3Q19 LBM formulation, 19 distribution values encode 19 degrees of freedom, but a 3D fluid has only 10 independent physical quantities (1 density, 3 momentum, 6 stress tensor components). The remaining 9 degrees of freedom are "ghost modes," mathematical artifacts of the lattice geometry that are orthogonal to all physical quantities by construction (Lallemand & Luo, 2000; d'Humieres et al., 2002). In conventional LBM, ghost modes serve only as numerical dampers, absorbing non-physical energy during violent flow events. This disclosure describes a method for repurposing ghost modes as a general-purpose metadata transport mechanism.
-
-Application-layer metadata, including but not limited to material identity, temperature, ownership or provenance, damage accumulation, lifecycle state, moisture content, chemical state, angular momentum, and control flags, may be encoded into the ghost mode components of the moment-space representation. This technique applies to any application requiring per-cell metadata that moves with a simulated fluid, including but not limited to interactive games, scientific visualization, industrial simulation, multi-material flow modeling, or any other context in which metadata must advect with the flow. Because ghost modes are orthogonal to all physical modes by linear-algebraic construction, the encoded metadata cannot affect density, momentum, or stress. This is a mathematical guarantee, not an empirical observation.
-
-The encoding may be performed as follows: after transforming distributions to moment space via the standard MRT transformation matrix (m = M * f), ghost moments (for example m[11] through m[19] in D3Q19) may be overwritten with encoded metadata values. Ghost relaxation rates may be set to zero (preserving injected values through collision) or to small values (allowing controlled diffusion at material boundaries). After streaming, the metadata may be recovered by transforming the received distributions back to moment space and reading the ghost components. The metadata advects with the fluid during streaming and mixes naturally at boundaries during collision, with no separate advection pass, no interpolation scheme, and no mass correction required.
-
-The stability function previously provided by ghost mode damping may be replaced by explicit energy limiting during collision, using available arithmetic headroom within the integer accumulator. For example, the applicant's integer LBM provides measured headroom of 862x within 32-bit integers, providing computational budget for multi-stage damping filters computed in-place during collision.
-
-The complete per-tick workflow may proceed as follows within a single compute dispatch: (1) transform distributions to moment space (m = M * f), (2) identify physical moments (for example m[1] through m[10]) which are not modified by the metadata system, (3) identify ghost moments (for example m[11] through m[19]) which may contain residual non-physical energy from the previous tick, (4) explicitly damp any accumulated ghost noise using arithmetic headroom (for example multi-stage energy limiting filters computed in-place), (5) inject application metadata by overwriting the damped ghost moments with encoded values, (6) relax physical modes via normal BGK or MRT collision, (7) transform back to distribution space (f = M_inv * m), and (8) pack and stream distributions to neighbors, with ghost-encoded metadata riding within the same packed words. All eight steps may execute within a single GPU compute dispatch.
-
-This encoding eliminates the following from the simulation pipeline: separate material advection passes (for example 1 full grid read/write per tick per metadata field), material interpolation with heaviest-corner lookup (per-cell branching and neighbor reads), post-advection mass correction passes, and separate metadata storage buffers. The metadata occupies bits within the existing distribution storage, requires zero additional memory, zero additional computation, and zero additional bandwidth. At for example 4.7 million cells, each eliminated grid pass may save approximately 0.5-1.0 ms on GPU.
-
-The number of available ghost modes varies by lattice: D2Q9 may provide 5 ghost modes, D3Q15 may provide 5, D3Q19 may provide 9, and D3Q27 may provide 17. Higher-order lattices provide more metadata capacity. Each ghost mode may carry approximately 10 bits of metadata in the applicant's integer representation, for a total of for example 90 bits of flowing metadata per cell in D3Q19, exceeding the 64-bit primary cell format.
-
-Because LBM streaming mixes neighboring distributions proportionally, ghost-encoded metadata naturally produces continuous spatial gradients at material boundaries. For example, a cell at the boundary between two materials (for example fire and water) may carry a ghost-encoded material identity that is a fractional blend of both materials, representing the interface as a continuous gradient rather than a discrete boundary. This eliminates the need for level set methods, volume-of-fluid tracking, or interface reconstruction algorithms, all of which are major computational systems in conventional multi-material simulation. The gradient may be used for rendering (smooth texture and color blending at material transitions), for interaction (damage and reactions propagate across a gradient zone rather than at a single cell boundary), and for physics (the fractional material identity may index into the interaction table to determine reaction behavior at the interface). Free spatial gradients at every material boundary in the simulation are a natural consequence of the ghost mode transport, requiring no additional computation.
-
-No prior art is known for using LBM ghost modes as a general-purpose metadata transport mechanism. Published LBM literature treats ghost modes exclusively as numerical artifacts to be damped. Existing approaches to metadata transport in fluid simulations, including tracer particles, passive scalar transport, level set methods, and multi-component LBM models, all require additional memory, additional computation, or both. Ghost mode encoding is unique in using already-computed, already-transported values that are mathematically guaranteed to not affect the physics.
 
 ### Prior art context
 
@@ -354,7 +356,7 @@ Existing LBM optimizations in the literature focus on memory layout transformati
 
 ---
 
-## Claim V. Integer Voxel Physics Substrate
+## Claim VI. Integer Voxel Physics Substrate
 
 An integer-only voxel physics simulation running on GPU compute shaders (for example WebGPU, or any equivalent GPU compute API), in which all physics computation uses fixed-width integer arithmetic with no floating-point operations. The simulation may operate on a 3D voxel grid (for example up to 128x64x256 cells or other grid dimensions) where every active cell reads its neighbors (for example 26 in a Moore neighborhood, or 6 in a von Neumann neighborhood, or other stencil configurations) and may compute its next state from integer logic alone. Grid dimensions may be quantized to multiples of the GPU workgroup size (for example multiples of 64) to ensure optimal thread occupancy.
 
@@ -364,7 +366,7 @@ The simulation architecture may unify multiple tiers of physics under a single c
 
 Per-cell physics simulation as a game world architecture: Noita (Nolla Games, 2019), Sandspiel (2018), Powder Game (2008), and the broader falling sand game genre. The most comparable systems in terms of simulation complexity, Noita (falling sand physics with per-pixel element interactions) and Teardown (voxel destruction physics), are native desktop applications built with custom C++/GPU engines. Neither runs in a browser, and neither implements dual-player element collision with a multi-element interaction matrix. No known browser-based system performs deterministic per-cell physics simulation with dual-player element interaction, multi-element collision matrices, and recomputed gravitational fields at grid scales exceeding one million cells at interactive frame rates, as of the date of this disclosure.
 
-### V.A. 10-Bit Cell Packing for Integer Voxel Simulation
+### VI.A. 10-Bit Cell Packing for Integer Voxel Simulation
 
 Each voxel in the simulation grid may store its physics state packed at 10-bit precision rather than the conventional 16-bit, fitting a complete 3D physics state into 2 native 32-bit words rather than 3. This optimization achieves a measured 14x improvement in neighbor stencil read performance and 33% memory reduction over 16-bit packing, due to the resulting increase in cache line density.
 
@@ -374,19 +376,19 @@ The 8-byte vs 12-byte cell size directly determines cache performance: a 128-byt
 
 Velocity quantization in integer physics simulations may cause particles to lock into rational orbits (deterministic rail artifacts). A deterministic subpixel jitter derived from cell position via an integer hash function (for example a Weyl hash) may break these rational orbit locks without introducing floating-point arithmetic or non-deterministic randomness.
 
-### V.B. Data-Driven Physics via Behavior Lookup Table and Element Property Table
+### VI.B. Data-Driven Physics via Behavior Lookup Table and Element Property Table
 
 The cell may include a behavior or material index (for example a single byte supporting up to 256 types) that indexes into a compact behavior lookup table (for example 32 bytes per entry, 8KB total) defining how that cell's contents propagate, reproduce, interact, and decay. The lookup table may encode parameters including but not limited to: propagation rules (for example a Wolfram CA rule number or other transition function), reproduction behavior (spawn rate, threshold, child type), lifecycle parameters (fuse timer, phase shifting, decay rate), combat interactions (element drain, contagion, combo triggers), movement characteristics (surface affinity, wall behavior, jitter amplitude), and visual properties (stealth, brightness curve). The behavior of any game entity is fully defined by its LUT entry; no per-entity code, scripts, or object instances are required.
 
 Each element type in the simulation may additionally be defined by a per-element property table encoding continuous physical characteristics, including but not limited to mass, viscosity, conductivity, brittleness, hardness, elasticity, surface tension, and flammability. These properties govern how elements respond to forces, temperature gradients, and contact with other element types. An N-by-N interaction matrix (for example 32x32 for 32 element types) may define the pairwise outcome when any two element types are co-located within the same cell or occupy adjacent cells, producing emergent physical behavior from table lookups rather than scripted logic. This is distinct from block-based voxel systems (for example Minecraft) where blocks have discrete types but lack continuous physical properties, and where interactions such as fluid flow or explosion damage are implemented as special-case algorithms rather than emerging from a universal property table and interaction matrix.
 
-### V.C. Generative and Temperature-Modulated CA Rules
+### VI.C. Generative and Temperature-Modulated CA Rules
 
 The LUT and element table may drive behaviors beyond cellular automata rules. For example, a nature element's LUT entry may encode structured growth parameters such as fractal branching ratios, segment lengths before splitting, and branch angle ranges, producing tree-like or vine-like structures from local cell decisions without a global growth planner. The CA neighbor stencil is one mechanism available to the LUT, but the LUT may encode any generative rule, including L-system-like growth, reaction-diffusion patterns, or other structured behaviors that use the neighbor state as input but are not limited to traditional CA transition functions.
 
 The propagation rule stored in the LUT or element table (for example a Wolfram CA rule number) need not be static. A cell state value such as temperature, which persists tick to tick and propagates via conduction between neighbors, may modulate the effective propagation rule at runtime. For example, the effective rule may be computed as `(base_rule + temperature / N) % 256` where N is a scaling constant, causing the same element to exhibit different CA propagation behavior across its temperature range. Cold cells propagate in orderly, predictable patterns; hot cells propagate chaotically. A cooling lava flow transitions gradually from turbulent to solid behavior not through scripted animation but through the rule number sliding along the Wolfram spectrum as temperature conducts away. This produces emergent visual and behavioral complexity from the interaction of two integer cell fields (element type and temperature) with zero additional state or computation beyond the modular arithmetic already present in the CA tick.
 
-### V.D. Entity-Free Interaction via Substrate Evolution
+### VI.D. Entity-Free Interaction via Substrate Evolution
 
 In traditional game architectures, interactive entities such as spells, projectiles, or creatures are explicitly instantiated objects with properties (for example health points, position, velocity, lifetime) managed by game logic. Each entity is allocated, updated per frame, checked for collisions, and eventually garbage collected. This system eliminates the entity abstraction entirely. No entity objects exist. No entity allocation, no garbage collection, no collision detection system, no per-entity update loop.
 
@@ -398,7 +400,7 @@ Multi-generational entity chains (for example a hive that spawns drones, or a sp
 
 Entity survivability is likewise emergent rather than stored. No health field exists. A region of dense element concentration (for example 200 fire particles) survives longer because decay takes more ticks to reach zero. A thin region (for example 5 particles) dies in a few ticks. A gravity core (VI.C) maintains concentration by pulling mass together. The visual representation of an entity's state, its size, brightness, and particle density, is a direct readout of its element concentration, not a rendering of a separate health variable. The visual state of an entity directly communicates its survivability without requiring a separate health indicator.
 
-### V.E. Universal Blur Shader with LUT-Selected Physics
+### VI.E. Universal Blur Shader with LUT-Selected Physics
 
 Multiple physically distinct simulation operations, including but not limited to gravitational field computation, velocity diffusion (viscosity), pressure solving, and temperature conduction, may be recognized as instances of the same mathematical operation: a Gaussian blur (or other convolution) with a domain-specific kernel. A single universal compute shader may implement this convolution, with the physical behavior determined entirely by which lookup table (LUT) of kernel weights is selected at dispatch time. The shader reads from a shared LUT buffer, where each physics operation corresponds to a different offset and radius within that buffer.
 
@@ -406,7 +408,7 @@ For example, gravity may use a wide kernel (for example radius 59, large sigma) 
 
 This unification may reduce the shader codebase to a single parameterized compute shader that handles all diffusion-like physics operations in the simulation. The number of dispatches per tick is determined by the number of physics operations and their axis-separable passes (for example 3 axes per operation), not by the number of distinct shader programs. Adding a new physics operation (for example magnetic field propagation) may require only defining a new LUT entry, not writing a new shader.
 
-### V.F. Orthogonal Transition Systems within a Single Dispatch
+### VI.F. Orthogonal Transition Systems within a Single Dispatch
 
 Material state transitions in the simulation may be driven by three independent and orthogonal systems, each reading from a separate compact lookup table and each triggering on a different condition:
 
@@ -420,21 +422,21 @@ All three transition systems may be evaluated within a single advection or CA di
 
 ---
 
-## Claim VI. Deterministic Integer Multiplayer via Serverless Peer-to-Peer State Sync
+## Claim VII. Deterministic Integer Multiplayer via Serverless Peer-to-Peer State Sync
 
 The integer-only voxel physics substrate described in Claim V may serve as the authoritative game state for peer-to-peer multiplayer in a client-side runtime such as a browser, requiring no authoritative server. Integer-only arithmetic (including but not limited to u8, u16, u32, or other fixed-width integer types) guarantees bit-identical output across all hardware. No floating point. No rounding ambiguity. No hardware-dependent divergence.
 
 Two independent machines may each simulate a complete emergent physics world and remain bit-identical across arbitrarily many cell updates, synchronized entirely through compact input recipes rather than state transmission. Multiplayer simulation requiring bit-identical state across all participating machines cannot tolerate floating-point arithmetic, which produces hardware-dependent rounding differences that compound across millions of cell updates and produce divergent game states within seconds. Integer-only arithmetic is therefore not a design preference but an architectural requirement for serverless deterministic multiplayer at scale. The specific combination of deterministic integer GPU compute as a simulation substrate, compact recipe-based state sync, and rollback netcode running entirely in a client-side runtime represents a novel multiplayer architecture.
 
-### VI.A. Recipe-Based State Sync
+### VII.A. Recipe-Based State Sync
 
 Because the simulation is deterministic, two or more machines receiving the same inputs produce identical state without exchanging simulation data. Game entities such as spells or other interactive objects are transmitted as compact recipes (for example approximately 30 bytes) rather than cell-by-cell state. All machines expand the recipe identically using a shared deterministic PRNG seed or equivalent deterministic expansion method. The expansion relies on integer-only pseudorandom number generation, such as xorshift, which produces bit-identical sequences from identical seeds on all hardware architectures, requiring no floating-point operations and no hardware-specific numerical behavior. This can reduce per-entity network cost by an order of magnitude or more (for example approximately 40x in one configuration). The entire multiplayer simulation may run peer-to-peer over low-latency transport channels such as WebRTC data channels, WebSocket, or other real-time protocols, at bandwidths on the order of kilobytes per second (for example approximately 5.9 KB/sec in one configuration).
 
-### VI.B. Two-Layer Simulation and Rendering Architecture
+### VII.B. Two-Layer Simulation and Rendering Architecture
 
 A complementary two-layer architecture separates the integer simulation layer from a rendering layer that may use float-precision or other visual representations: the integer state is the authoritative truth, synced and deterministic; the rendering is local and may diverge freely between machines without affecting game outcome. Because the simulation grid is already a GPU buffer, the rendering pipeline may read directly from it as instance attributes, vertex data, or texture input, with no CPU readback, no copy, and no intermediate transfer. Both layers may share the same GPU device and command encoder, with the compute pass writing the simulation state and the render pass reading it within the same frame submission.
 
-### VI.C. Field Structure as Entity Coherence in an Entity-Free Substrate
+### VII.C. Field Structure as Entity Coherence in an Entity-Free Substrate
 
 When a game entity such as a spell is instantiated, the primary grid may receive expanded particle mass (element counts, momentum), while a gravitational or force field (computed via any method, including but not limited to Claim VII or the universal blur shader of V.E) may receive a core attractor at the entity's center with configurable strength and angular velocity. The particle mass has no intrinsic knowledge of its membership in an entity. It is integer state with forward momentum. The field core may pull the mass into formation. Shape, rotation, and coherence may emerge from the interaction between mass and field rather than being encoded per-particle or per-entity.
 
@@ -442,23 +444,23 @@ As the entity travels through the simulation volume, the field core may travel w
 
 Multiple entities may create overlapping field influences that sum. The simulation reads the net result and each element may respond according to its mass property from a global element table. Entity identity is defined by the presence of a field core. Entity coherence is maintained by the field's pull on surrounding mass. The field is therefore not an auxiliary force system but the mechanism by which entities exist, cohere, and terminate within the simulation.
 
-### VI.D. Sparse Compute Dispatch
+### VII.D. Sparse Compute Dispatch
 
 An active cell list or equivalent sparse data structure maintains only occupied cells and their neighbor halos, reducing GPU thread dispatch from the full grid volume to only the active region (for example dispatching hundreds of threads for a localized entity instead of millions for the full grid). Each tick, the GPU writes back which cells are newly active and which went inactive, maintaining the list frame to frame. A complementary hierarchical approach may divide the grid into chunks with per-chunk active flags, dispatching compute only on active chunks.
 
 The active cell set may simultaneously serve as both the compute dispatch structure and the visual representation of the simulation. Because only active cells are dispatched for computation, and only active cells contain state worth rendering, the set of cells the GPU computes and the set of cells the renderer draws may be the same data structure. The visual output is not a secondary rendering pass over game state but a direct readout of the compute topology itself. Where no computation occurs, no visual content exists. The optimization and the visualization are unified rather than layered.
 
-### VI.E. Rollback Netcode on GPU Compute
+### VII.E. Rollback Netcode on GPU Compute
 
 The determinism of the integer simulation enables rollback-based netcode models such as GGPO: each machine runs speculatively with predicted opponent input, and on mismatch rewinds to the last confirmed state and re-simulates forward. The integer simulation is efficient enough on GPU compute to re-run multiple frames (for example 3-5 frames) in a single tick without dropping below interactive frame rates.
 
-### VI.F. Deterministic Positional PRNG for Visual Randomness
+### VII.F. Deterministic Positional PRNG for Visual Randomness
 
 Cell behaviors that require apparent randomness (for example jitter, random walk, or stochastic decay) may use a deterministic pseudorandom number generator seeded from values that are deterministically identical on all machines, including but not limited to the cell's grid position, the current simulation tick count, cell state values such as temperature, or combinations thereof (for example via xorshift32 or other integer PRNG). Because the seed is derived entirely from values that are identical on all machines (grid position is structural, tick count and cell state are synchronized by the deterministic simulation), the PRNG output is bit-identical across all participating machines without transmitting or synchronizing any random state over the network. Each cell independently computes its own "randomness" and all machines agree on the result. This provides visually random behavior (particles jitter, decay varies, spawn timing fluctuates) while maintaining the strict determinism required by the multiplayer architecture of Claim VI and the rollback netcode of VI.E.
 
 ---
 
-## Claim VII. Flat-Grid Force Field Approximation for Real-Time GPU Simulation
+## Claim VIII. Flat-Grid Force Field Approximation for Real-Time GPU Simulation
 
 A method for computing gravitational or other inverse-square force fields on a 3D grid using a two-pass flat coarse grid approach that replaces sequential convolution, FFT-based solvers, or tree-based traversal methods with a single reduction pass and a single force-read pass, achieving equivalent physical accuracy with zero sequential dependency between cells and zero branching in GPU execution.
 
@@ -468,7 +470,7 @@ Existing approaches to N-body gravitational computation on grids each have GPU-h
 
 The method operates on two data structures: the fine simulation grid (for example 192x128x192 cells) and a flat coarse grid at reduced resolution (for example 8x downsampling on each axis, producing a coarse grid that may fit entirely in GPU L1 cache). A precomputed offset table stores relative 3D offsets into the coarse grid sorted by distance, and a precomputed falloff lookup table stores inverse-square attenuation values indexed by squared distance.
 
-### VII.A. Two-Pass Force Computation
+### VIII.A. Two-Pass Force Computation
 
 Pass 1 (Reduction): A single compute dispatch reduces the fine grid to the coarse grid. Each workgroup handles one coarse chunk, summing the mass of all fine cells within it via shared-memory parallel reduction. All workgroups execute independently with no inter-workgroup dependency.
 
@@ -476,7 +478,7 @@ Pass 2 (Force Read): A single compute dispatch over the full fine grid. Each thr
 
 Only a single barrier between Pass 1 and Pass 2 is required. No sequential dependency exists between cells within either pass.
 
-### VII.B. Benchmarked Accuracy and Performance
+### VIII.B. Benchmarked Accuracy and Performance
 
 Benchmarked on Apple Silicon GPU, WebGPU, with full physics simulation including element interactions, momentum diffusion, and gravity:
 
@@ -489,7 +491,7 @@ After 600 ticks of full physics simulation, the 3-sample meta grid produces a ma
 
 At the larger arena size, the blur baseline barely survives 120fps (0.3ms headroom). The meta grid method has 4.0ms headroom at the same arena size. The blur was the arena size ceiling. The meta grid removes that ceiling.
 
-### VII.C. Optimal Downsampling Factor
+### VIII.C. Optimal Downsampling Factor
 
 The downsampling factor determines the coarse chunk size and affects both speed and accuracy:
 
@@ -501,7 +503,7 @@ The downsampling factor determines the coarse chunk size and affects both speed 
 
 8x downsampling may be optimal: coarse enough for effective spatial averaging, fine enough to preserve spatial detail, and the coarse grid fits in GPU L1 cache. The method's accuracy may improve (not degrade) with coarser chunks up to a point, because coarser spatial averaging better matches the smooth nature of gravitational fields.
 
-### VII.D. GPU Execution Characteristics
+### VIII.D. GPU Execution Characteristics
 
 The method may exhibit the following GPU execution characteristics that distinguish it from prior force field computation approaches:
 
@@ -511,7 +513,7 @@ The method may exhibit the following GPU execution characteristics that distingu
 - Cache-friendly: the coarse grid, falloff LUT, and offset table may fit entirely in GPU L1 cache, with the only VRAM traffic being fine-grid mass reads (Pass 1) and force vector writes (Pass 2)
 - Linear scaling: O(N x K) where N is cell count and K is sample count, with K typically 3
 
-### VII.E. Generality Beyond Voxel Simulation
+### VIII.E. Generality Beyond Voxel Simulation
 
 While demonstrated in the context of the voxel simulation described in Claim V, this method applies to any GPU compute workload requiring approximate inverse-square force fields on a regular 3D grid, including but not limited to gravitational simulation, electrostatic field computation, fluid pressure solving, or other applications where distant contributions fall off with distance and spatial averaging provides acceptable approximation of the full convolution.
 
