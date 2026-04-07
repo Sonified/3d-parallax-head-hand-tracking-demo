@@ -1,7 +1,6 @@
-/*! coi-serviceworker v0.1.7 - Guido Zuidhof, licensed under MIT */
-// This service worker adds Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy
-// headers to enable crossOriginIsolated state, which is required for WebGPU in workers.
+/*! coi-serviceworker - enables crossOriginIsolated on hosts without COOP/COEP headers */
 if (typeof window === 'undefined') {
+  // Service worker context
   self.addEventListener("install", () => self.skipWaiting());
   self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
@@ -25,16 +24,27 @@ if (typeof window === 'undefined') {
     );
   });
 } else {
-  // Main thread: register the service worker
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("coi-serviceworker.js").then(
-      (registration) => {
-        if (registration.active && !navigator.serviceWorker.controller) {
-          // Service worker is active but not controlling this page yet - reload
-          window.location.reload();
-        }
-      },
-      (err) => console.error("COI service worker registration failed:", err)
+  // Main thread: register SW, reload once it takes control
+  (async () => {
+    if (!("serviceWorker" in navigator)) return;
+
+    const registration = await navigator.serviceWorker.register(
+      new URL("coi-serviceworker.js", document.currentScript.src)
     );
-  }
+
+    // If already controlling, nothing to do
+    if (navigator.serviceWorker.controller) return;
+
+    // Wait for the SW to become active
+    const sw = registration.installing || registration.waiting || registration.active;
+    if (!sw) return;
+
+    if (sw.state === "activated") {
+      window.location.reload();
+    } else {
+      sw.addEventListener("statechange", () => {
+        if (sw.state === "activated") window.location.reload();
+      });
+    }
+  })();
 }
