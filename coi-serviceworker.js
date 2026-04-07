@@ -27,7 +27,7 @@ if (typeof window === 'undefined') {
 } else {
   // Main thread: register the service worker
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register(new URL("coi-serviceworker.js", import.meta.url || location.href)).then(
+    navigator.serviceWorker.register("coi-serviceworker.js").then(
       (registration) => {
         if (registration.active && !navigator.serviceWorker.controller) {
           // Service worker is active but not controlling this page yet - reload
