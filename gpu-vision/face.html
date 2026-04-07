@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGPU Face Tracking</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #111;
+      color: #eee;
+      font-family: system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    #webcam, #overlay {
+      width: 800px;
+      transform: scaleX(-1);
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 12px;
+      font-weight: 400;
+    }
+    #status {
+      margin-bottom: 12px;
+      color: #aaa;
+      font-size: 0.9rem;
+    }
+    #container {
+      position: relative;
+      display: inline-block;
+    }
+    #webcam {
+      display: block;
+      border-radius: 8px;
+    }
+    #overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      border-radius: 8px;
+      pointer-events: none;
+    }
+    #fps {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      background: rgba(0,0,0,0.6);
+      color: #0f0;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-family: monospace;
+    }
+    .bs-panel::-webkit-scrollbar { width: 4px; }
+    .bs-panel::-webkit-scrollbar-track { background: #111; }
+    .bs-panel::-webkit-scrollbar-thumb { background: #4af; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <h1>WebGPU Face Tracking</h1>
+  <div id="status">Initializing...</div>
+  <div style="display: flex; gap: 20px; align-items: flex-start;">
+    <div>
+      <div id="container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="overlay"></canvas>
+        <div id="fps"></div>
+      </div>
+      <div style="margin-top: 12px; display: flex; gap: 16px;">
+        <label style="cursor: pointer; user-select: none;">
+          <input type="checkbox" id="showDebug" checked> Bounding box
+        </label>
+        <label style="cursor: pointer; user-select: none;">
+          <input type="checkbox" id="enableBlendshapes" checked> Blendshapes
+        </label>
+      </div>
+    </div>
+    <div id="blendshapePanel" class="bs-panel" style="display: none; width: 280px; max-height: 600px; overflow-y: auto; font-family: monospace; font-size: 0.7rem;"></div>
+  </div>
+  <script type="module" src="/src/face-main.js"></script>
+</body>
+</html>

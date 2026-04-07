@@ -10,9 +10,9 @@
   canvas { display: block; }
   #hud {
     position: fixed; bottom: 16px; left: 16px; z-index: 10;
-    font-size: 0.85rem; line-height: 1.6; color: #ccc;
+    font-size: 1.1rem; line-height: 1.6; color: #ccc;
     background: rgba(10,10,26,0.8); padding: 12px 16px; border-radius: 8px;
-    border: 1px solid #333; backdrop-filter: blur(8px); max-width: 340px;
+    border: 1px solid #333; backdrop-filter: blur(8px); max-width: 400px;
   }
   #hud .label { color: #888; }
   #hud .val { color: #4fc3f7; font-weight: 600; }
@@ -20,39 +20,86 @@
   #hud .open { color: #4fc3f7; }
   #start-btn {
     position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    z-index: 20; padding: 16px 32px; font-size: 1.2rem; background: #4fc3f7;
-    color: #0a0a1a; border: none; border-radius: 8px; cursor: pointer; font-weight: 700;
+    z-index: 20; padding: 16px 32px; font-size: 1.55rem; background: #4fc3f7;
+    color: #0a0a1a; border: none; border-radius: 3px; cursor: pointer; font-weight: 700;
   }
   #start-btn:hover { background: #81d4fa; }
   #status {
     position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
-    z-index: 10; font-size: 0.8rem; color: #888;
+    z-index: 10; font-size: 1.2rem; color: #ccc; font-weight: 500;
+    background: rgba(10,10,26,0.8); padding: 8px 16px; border-radius: 6px;
+    border: 1px solid #333; backdrop-filter: blur(8px);
   }
   #controls {
     position: fixed; top: 12px; left: 12px; z-index: 10;
-    font-size: 0.8rem; color: #ccc;
+    font-size: 1.04rem; color: #ccc;
     background: rgba(10,10,26,0.8); padding: 8px 12px; border-radius: 6px;
     border: 1px solid #333; backdrop-filter: blur(8px); display: none;
   }
   #controls select {
     background: #111; color: #fff; border: 1px solid #444; border-radius: 3px;
-    padding: 2px 6px; font-size: 0.8rem; margin-left: 4px;
+    padding: 2px 6px; font-size: 1.04rem; margin-left: 4px;
+  }
+  #controls .sep { margin-left: 10px; }
+  #filter-controls {
+    position: fixed; top: 12px; right: 12px; z-index: 10;
+    font-size: 0.9rem; color: #ccc;
+    background: rgba(10,10,26,0.85); padding: 10px 14px; border-radius: 6px;
+    border: 1px solid #333; backdrop-filter: blur(8px); display: none;
+    min-width: 220px;
+  }
+  #filter-controls .section-label {
+    color: #4fc3f7; font-weight: 600; font-size: 0.95rem;
+    margin-top: 8px; margin-bottom: 4px;
+  }
+  #filter-controls .section-label:first-child { margin-top: 0; }
+  #filter-controls .param-row {
+    display: flex; align-items: center; margin-bottom: 3px;
+  }
+  #filter-controls .param-name {
+    width: 90px; color: #888; font-size: 0.85rem;
+  }
+  #filter-controls input[type="range"] {
+    flex: 1; height: 4px; accent-color: #4fc3f7; cursor: pointer;
+  }
+  #filter-controls .param-val {
+    width: 40px; text-align: right; color: #4fc3f7; font-size: 0.8rem; font-weight: 600;
   }
 </style>
 </head>
 <body>
 
 <div id="controls">
-  <span style="color:#888;">Parallax</span>
+  <span style="color:#888;">Backend</span>
+  <select id="backend-select">
+    <option value="webgpu">WebGPU</option>
+    <option value="mediapipe">MediaPipe</option>
+  </select>
+  <span class="sep" style="color:#888;">Parallax</span>
   <select id="parallax-select">
-    <option value="on">On</option>
+    <option value="relative">Relative</option>
+    <option value="raw">Raw</option>
     <option value="off">Off</option>
   </select>
-  <span style="color:#888; margin-left:8px;">Hands</span>
+  <span class="sep" style="color:#888;">Hands</span>
   <select id="num-hands-select">
     <option value="1">1</option>
-    <option value="2">2</option>
+    <option value="2" selected>2</option>
   </select>
+</div>
+
+<div id="filter-controls">
+  <div class="section-label" style="display:flex; justify-content:space-between; align-items:center;">Head <button id="recenter-btn" style="background:#222; color:#4fc3f7; border:1px solid #444; border-radius:4px; padding:2px 8px; font-size:0.75rem; cursor:pointer; font-weight:400;">Recenter</button></div>
+  <div class="param-row"><span class="param-name">Smoothing</span><input type="range" id="head-smooth" min="0.1" max="2" step="0.1" value="0.4"><span class="param-val" id="head-smooth-val">0.4</span></div>
+  <div class="param-row"><span class="param-name">Baseline</span><input type="range" id="head-baseline" min="0.1" max="5" step="0.1" value="2.1"><span class="param-val" id="head-baseline-val">2.1</span></div>
+  <div class="param-row"><span class="param-name">Acceleration</span><input type="range" id="head-accel" min="0" max="0.1" step="0.001" value="0.043"><span class="param-val" id="head-accel-val">0.043</span></div>
+  <div class="section-label">Parallax</div>
+  <div class="param-row"><span class="param-name">Amount</span><input type="range" id="parallax-amount" min="0" max="2" step="0.05" value="0.5"><span class="param-val" id="parallax-amount-val">0.50</span></div>
+  <div class="section-label">Hands</div>
+  <div class="param-row"><span class="param-name">Smoothing</span><input type="range" id="hand-smooth" min="0.1" max="2" step="0.1" value="0.7"><span class="param-val" id="hand-smooth-val">0.7</span></div>
+  <div class="param-row"><span class="param-name">Baseline</span><input type="range" id="hand-baseline" min="0.1" max="5" step="0.1" value="1.0"><span class="param-val" id="hand-baseline-val">1.0</span></div>
+  <div class="param-row"><span class="param-name">Acceleration</span><input type="range" id="hand-accel" min="0" max="0.1" step="0.001" value="0.01"><span class="param-val" id="hand-accel-val">0.010</span></div>
+  <div style="text-align:right; margin-top:8px;"><button id="copy-settings-btn" style="background:#222; color:#4fc3f7; border:1px solid #444; border-radius:4px; padding:3px 10px; font-size:0.8rem; cursor:pointer;">Copy</button></div>
 </div>
 
 <div id="status">Click Start to enable camera</div>
@@ -63,6 +110,7 @@
   <div><span class="label">Hand: </span><span id="hand-state" class="val">--</span></div>
   <div><span class="label">Gesture: </span><span id="gesture-state" class="val">--</span></div>
   <div><span class="label">FPS: </span><span id="fps" class="val">--</span></div>
+  <div><span class="label">Backend: </span><span id="backend-label" class="val">--</span></div>
 </div>
 
 <div id="winner" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:20; font-size:4rem; font-weight:700; color:#fff; font-family:system-ui,sans-serif;">You Win!</div>
@@ -81,21 +129,24 @@
 import * as THREE from 'three';
 
 // ============================================================
-// METHOD: Single-Camera Head-Coupled Parallax + Hand Gesture Input
-//
-// Architecture:
-//   1. Single consumer webcam (getUserMedia, no depth sensor)
-//   2. Two concurrent Web Workers:
-//      - Face Worker: MediaPipe FaceDetector for head position
-//      - Hand Worker: MediaPipe HandLandmarker for gesture recognition
-//   3. ImageBitmap transfer: video frames sent to workers without copying
-//   4. Head position drives camera offset (head-coupled parallax / fish-tank VR)
-//   5. Hand landmarks drive gesture detection (pinch = fire, open = idle)
-//   6. Three.js renders the parallax-corrected 3D scene
-//   7. Runs entirely in-browser, no plugins, no special hardware
+// Settings: persisted in localStorage, restored on refresh
 // ============================================================
+const DEFAULTS = { backend: 'webgpu', parallax: 'relative', numHands: '2' };
+function getSetting(key) { const v = localStorage.getItem(key); return v !== null ? v : DEFAULTS[key]; }
+function setSetting(key, val) { localStorage.setItem(key, val); }
 
-// --- 3D Scene Setup ---
+// Restore UI from settings
+const backendSelect = document.getElementById('backend-select');
+const parallaxSelect = document.getElementById('parallax-select');
+const numHandsSelect = document.getElementById('num-hands-select');
+
+backendSelect.value = getSetting('backend');
+parallaxSelect.value = getSetting('parallax');
+numHandsSelect.value = getSetting('numHands');
+
+// ============================================================
+// 3D Scene Setup
+// ============================================================
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0a1a);
 scene.fog = new THREE.FogExp2(0x0a0a1a, 0.015);
@@ -112,7 +163,7 @@ document.body.appendChild(renderer.domElement);
 const ambient = new THREE.AmbientLight(0x667799, 1.2);
 scene.add(ambient);
 const frontLight = new THREE.DirectionalLight(0xffffff, 1.0);
-frontLight.position.set(0, 2, 8); // from camera side
+frontLight.position.set(0, 2, 8);
 scene.add(frontLight);
 const pointLight = new THREE.PointLight(0xff6d00, 2, 50);
 pointLight.position.set(0, 3, -4);
@@ -121,14 +172,14 @@ const fillLight = new THREE.DirectionalLight(0x4488cc, 0.6);
 fillLight.position.set(-5, 2, 2);
 scene.add(fillLight);
 
-// Grid of cubes as the 3D environment
+// Grid of cubes
 const cubes = [];
 const cubeGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
 
 function spawnCubes() {
   for (let x = -4; x <= 4; x += 2) {
-    for (let y = -1; y <= 3; y += 2) {
-      for (let z = -15; z <= -5; z += 2.5) {
+    for (let y = -1.5; y <= 2.5; y += 2) {
+      for (let z = -15; z <= -0.5; z += 2.5) {
         const hue = (x + 4) / 8;
         const color = new THREE.Color().setHSL(hue, 0.6, 0.4);
         const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3 });
@@ -152,24 +203,23 @@ function fireProjectile(origin, vx, vy) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.copy(origin);
   scene.add(mesh);
-  projectiles.push({
-    mesh, vx, vy, vz: -20,
-    life: 4.0
-  });
+  projectiles.push({ mesh, vx, vy, vz: -20, life: 4.0 });
 }
 
-// --- Hand Skeleton Visualization (2 hands) ---
+// ============================================================
+// Hand Skeleton Visualization (2 hands)
+// ============================================================
 const JOINT_COUNT = 21;
 const HAND_CONNECTIONS = [
-  [0,1],[1,2],[2,3],[3,4],       // thumb
-  [0,5],[5,6],[6,7],[7,8],       // index
-  [0,9],[9,10],[10,11],[11,12],  // middle
-  [0,13],[13,14],[14,15],[15,16],// ring
-  [0,17],[17,18],[18,19],[19,20],// pinky
-  [5,9],[9,13],[13,17],          // palm
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [0,9],[9,10],[10,11],[11,12],
+  [0,13],[13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20],
+  [5,9],[9,13],[13,17],
 ];
 
-const HAND_COLORS = [0x4fc3f7, 0xff6dff]; // cyan, magenta
+const HAND_COLORS = [0x4fc3f7, 0xff6dff];
 const handSkeletons = [];
 for (let h = 0; h < 2; h++) {
   const group = new THREE.Group();
@@ -195,16 +245,15 @@ for (let h = 0; h < 2; h++) {
   handSkeletons.push({ group, joints, bones });
 }
 
-// Map MediaPipe normalized coords to scene space
 function landmarkToScene(lm) {
   return new THREE.Vector3(
     -(lm.x - 0.5) * 12 + camera.position.x,
     -(lm.y - 0.5) * 9 + camera.position.y,
-    camera.position.z - (4 + headPos.z * -4) + lm.z * -3
+    camera.position.z - (6 + headPos.z * -4) + lm.z * -3
   );
 }
 
-let currentHands = [null, null]; // landmarks per hand
+let currentHands = [null, null];
 
 function updateHandSkeletons() {
   for (let h = 0; h < 2; h++) {
@@ -232,97 +281,246 @@ function updateHandSkeletons() {
   }
 }
 
-// --- Head Tracking State ---
-const headPos = { x: 0, y: 0, z: 0 };       // smoothed head position (-1 to +1)
-const headSmooth = { x: 0, y: 0, z: 0 };     // smoothing buffer
-let refEyeDist = 0;                            // reference inter-eye distance for z
+// ============================================================
+// One Euro Filter
+// ============================================================
+class OneEuroFilter {
+  constructor(freq, minCutoff, beta, dCutoff) {
+    this.freq = freq;
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+    this.xPrev = null;
+    this.dxPrev = 0;
+    this.lastTime = null;
+  }
 
-// Parallax scaling (world units of camera shift at full head offset)
+  _alpha(cutoff) {
+    const te = 1.0 / this.freq;
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / te);
+  }
+
+  filter(x, timestamp) {
+    if (this.lastTime !== null && timestamp !== undefined) {
+      const dt = (timestamp - this.lastTime) / 1000;
+      if (dt > 0) this.freq = 1.0 / dt;
+    }
+    this.lastTime = timestamp;
+
+    if (this.xPrev === null) {
+      this.xPrev = x;
+      this.dxPrev = 0;
+      return x;
+    }
+
+    const dx = (x - this.xPrev) * this.freq;
+    const aDeriv = this._alpha(this.dCutoff);
+    const edx = aDeriv * dx + (1 - aDeriv) * this.dxPrev;
+    this.dxPrev = edx;
+
+    const cutoff = this.minCutoff + this.beta * Math.abs(edx);
+    const a = this._alpha(cutoff);
+    const result = a * x + (1 - a) * this.xPrev;
+    this.xPrev = result;
+    return result;
+  }
+
+  reset() {
+    this.xPrev = null;
+    this.dxPrev = 0;
+    this.lastTime = null;
+  }
+}
+
+// ============================================================
+// Filter Parameters (persisted in localStorage)
+// ============================================================
+const FILTER_DEFAULTS = {
+  'head-smooth': '0.4', 'head-baseline': '2.1', 'head-accel': '0.043',
+  'hand-smooth': '0.7', 'hand-baseline': '1.0', 'hand-accel': '0.01',
+};
+function getFilter(key) { const v = localStorage.getItem(key); return parseFloat(v !== null ? v : FILTER_DEFAULTS[key]); }
+
+const filterParams = {
+  head:  { smooth: getFilter('head-smooth'), baseline: getFilter('head-baseline'), accel: getFilter('head-accel') },
+  hand:  { smooth: getFilter('hand-smooth'), baseline: getFilter('hand-baseline'), accel: getFilter('hand-accel') },
+};
+
+// Smoothing slider is inverted: higher slider = lower min_cutoff = more smoothing
+function smoothToMinCutoff(sliderVal) { return 1.0 / sliderVal; }
+
+// Head filters: x, y, z
+const headFilters = ['x', 'y', 'z'].map(() =>
+  new OneEuroFilter(60, smoothToMinCutoff(filterParams.head.smooth), filterParams.head.accel, filterParams.head.baseline)
+);
+
+// Hand filters: 2 hands x 21 joints x 3 axes
+const handFilters = Array.from({ length: 2 }, () =>
+  Array.from({ length: 21 }, () =>
+    ['x', 'y', 'z'].map(() =>
+      new OneEuroFilter(60, smoothToMinCutoff(filterParams.hand.smooth), filterParams.hand.accel, filterParams.hand.baseline)
+    )
+  )
+);
+
+function updateFilterParams(group, param, value) {
+  const flatFilters = group === 'head' ? headFilters : handFilters.flat().flatMap(j => j);
+  for (const f of flatFilters) {
+    if (param === 'smooth') f.minCutoff = smoothToMinCutoff(value);
+    else if (param === 'baseline') f.dCutoff = value;
+    else if (param === 'accel') f.beta = value;
+  }
+}
+
+// Restore slider UI from saved values and wire up events
+for (const group of ['head', 'hand']) {
+  for (const param of ['smooth', 'baseline', 'accel']) {
+    const slider = document.getElementById(`${group}-${param}`);
+    const valEl = document.getElementById(`${group}-${param}-val`);
+    const saved = filterParams[group][param];
+    slider.value = saved;
+    valEl.textContent = param === 'accel' ? saved.toFixed(3) : saved.toFixed(1);
+
+    slider.addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      filterParams[group][param] = v;
+      valEl.textContent = param === 'accel' ? v.toFixed(3) : v.toFixed(1);
+      setSetting(`${group}-${param}`, v.toString());
+      updateFilterParams(group, param, v);
+    });
+  }
+}
+
+// Recenter button: captures current position as the new center
+document.getElementById('recenter-btn').addEventListener('click', () => {
+  // Use smoothed position: offset += where the filter says we are
+  headOffset.x += headPos.x;
+  headOffset.y += headPos.y;
+  headOffset.z += headPos.z;
+  headPos.x = headPos.y = headPos.z = 0;
+  for (const f of headFilters) f.reset();
+  const btn = document.getElementById('recenter-btn');
+  btn.textContent = 'Done!';
+  setTimeout(() => { btn.textContent = 'Recenter'; }, 800);
+});
+
+// Copy settings button
+document.getElementById('copy-settings-btn').addEventListener('click', () => {
+  const settings = {
+    head: { smoothing: filterParams.head.smooth, baseline: filterParams.head.baseline, acceleration: filterParams.head.accel },
+    parallax: { amount: parallaxAmount },
+    hands: { smoothing: filterParams.hand.smooth, baseline: filterParams.hand.baseline, acceleration: filterParams.hand.accel },
+  };
+  navigator.clipboard.writeText(JSON.stringify(settings, null, 2));
+  const btn = document.getElementById('copy-settings-btn');
+  btn.textContent = 'Copied!';
+  setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+});
+
+// ============================================================
+// Head Tracking State
+// ============================================================
+const headPos = { x: 0, y: 0, z: 0 };
+let refEyeDist = 0;
+const headOffset = { x: 0, y: 0, z: 0 }; // subtracted from raw to recenter
+const headRaw = { x: 0, y: 0, z: 0 };    // last raw values before offset
+let headCalibrated = false;               // auto-recenter on first detection in relative mode
+
 const PARALLAX_X = 6;
 const PARALLAX_Y = 4;
 const PARALLAX_Z = 3;
-const SMOOTHING = 0.15; // exponential smoothing factor
+let parallaxAmount = parseFloat((v => v !== null ? v : '1.0')(localStorage.getItem('parallax-amount')));
 
-// --- Hand Tracking State (per hand) ---
+// Parallax amount slider
+const parallaxAmountSlider = document.getElementById('parallax-amount');
+const parallaxAmountVal = document.getElementById('parallax-amount-val');
+parallaxAmountSlider.value = parallaxAmount;
+parallaxAmountVal.textContent = parallaxAmount.toFixed(2);
+parallaxAmountSlider.addEventListener('input', (e) => {
+  parallaxAmount = parseFloat(e.target.value);
+  parallaxAmountVal.textContent = parallaxAmount.toFixed(2);
+  setSetting('parallax-amount', parallaxAmount.toString());
+});
+
+// ============================================================
+// Hand Tracking State (per hand)
+// ============================================================
 const handStates = [
   { pinching: false, wasPinching: false, heldBall: null },
   { pinching: false, wasPinching: false, heldBall: null },
 ];
 const pinchThreshold = 0.05;
 
-// --- Worker Setup ---
-let faceWorker = null, handWorker = null;
-let faceReady = false, handReady = false;
-
-function initWorkers() {
-  // Face detection worker
-  faceWorker = new Worker('face-worker.js');
-  faceWorker.onmessage = (e) => {
-    if (e.data.type === 'init') { faceReady = true; updateStatus(); }
-    if (e.data.type === 'result') { handleFaceResult(e.data.face); faceIdle = true; }
-  };
-  faceWorker.postMessage({ type: 'init' });
-
-  // Hand landmark worker
-  handWorker = new Worker('hand-worker.js');
-  handWorker.onmessage = (e) => {
-    if (e.data.type === 'init') { handReady = true; updateStatus(); }
-    if (e.data.type === 'result') { handleHandResult(e.data.landmarks); handIdle = true; }
-  };
-  handWorker.postMessage({ type: 'init', numHands: 1 });
-}
-
-// --- Face Result Handler ---
-// Extracts head position from eye keypoints for parallax
+// ============================================================
+// Shared result handlers (used by both backends)
+// ============================================================
 function handleFaceResult(face) {
   if (!face) return;
   const kp = face.keypoints;
-  // MediaPipe face detector: keypoint 0 = left eye, keypoint 1 = right eye
   const leftEye = kp[0], rightEye = kp[1];
+  const now = performance.now();
 
-  // Horizontal and vertical position: normalized -1 to +1
-  const rawX = -((leftEye.x + rightEye.x) / 2 - 0.5) * 2; // negated: webcam is mirrored
-  const rawY = -((leftEye.y + rightEye.y) / 2 - 0.5) * 2;
+  headRaw.x = -((leftEye.x + rightEye.x) / 2 - 0.5) * 2;
+  headRaw.y = -((leftEye.y + rightEye.y) / 2 - 0.5) * 2;
 
-  // Depth from inter-eye distance (closer = larger distance between eyes)
   const eyeDist = Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y);
-  if (refEyeDist === 0) refEyeDist = eyeDist; // calibrate on first detection
-  const rawZ = -((eyeDist / refEyeDist) - 1); // inverted: lean in = camera forward
+  if (refEyeDist === 0) refEyeDist = eyeDist;
+  headRaw.z = -((eyeDist / refEyeDist) - 1);
 
-  // Exponential smoothing
-  headSmooth.x += (rawX - headSmooth.x) * SMOOTHING;
-  headSmooth.y += (rawY - headSmooth.y) * SMOOTHING;
-  headSmooth.z += (rawZ - headSmooth.z) * SMOOTHING;
+  // In relative mode, auto-calibrate on first detection
+  if (!headCalibrated && parallaxMode === 'relative') {
+    headOffset.x = headRaw.x;
+    headOffset.y = headRaw.y;
+    headOffset.z = headRaw.z;
+    headCalibrated = true;
+  }
 
-  headPos.x = headSmooth.x;
-  headPos.y = headSmooth.y;
-  headPos.z = headSmooth.z;
+  // Raw mode: no offset. Relative mode: subtract offset.
+  const ox = parallaxMode === 'raw' ? 0 : headOffset.x;
+  const oy = parallaxMode === 'raw' ? 0 : headOffset.y;
+  const oz = parallaxMode === 'raw' ? 0 : headOffset.z;
+  const rawX = headRaw.x - ox;
+  const rawY = headRaw.y - oy;
+  const rawZ = headRaw.z - oz;
+
+  headPos.x = headFilters[0].filter(rawX, now);
+  headPos.y = headFilters[1].filter(rawY, now);
+  headPos.z = headFilters[2].filter(rawZ, now);
 }
 
-// --- Hand Result Handler ---
-// Detects pinch gesture per hand from thumb-index distance
 function handleHandResult(landmarks) {
+  const now = performance.now();
   for (let h = 0; h < 2; h++) {
     if (!landmarks || h >= landmarks.length) {
       currentHands[h] = null;
       handStates[h].pinching = false;
+      // Reset filters so they don't stale-lerp when hand reappears
+      for (const joint of handFilters[h]) for (const f of joint) f.reset();
       continue;
     }
     const hand = landmarks[h];
-    currentHands[h] = hand;
+    // Filter each landmark
+    const filtered = hand.map((lm, j) => ({
+      x: handFilters[h][j][0].filter(lm.x, now),
+      y: handFilters[h][j][1].filter(lm.y, now),
+      z: handFilters[h][j][2].filter(lm.z, now),
+    }));
+    currentHands[h] = filtered;
     const dist = Math.hypot(
-      hand[4].x - hand[8].x,
-      hand[4].y - hand[8].y,
-      hand[4].z - hand[8].z
+      filtered[4].x - filtered[8].x,
+      filtered[4].y - filtered[8].y,
+      filtered[4].z - filtered[8].z
     );
     handStates[h].pinching = dist < pinchThreshold;
   }
 }
 
-// --- Head-Coupled Parallax ---
-// Shifts camera position based on head tracking to create
-// a "window into the scene" effect (fish-tank VR)
-let parallaxEnabled = true;
+// ============================================================
+// Head-Coupled Parallax
+// ============================================================
+let parallaxMode = getSetting('parallax') || 'relative'; // 'relative', 'raw', or 'off'
+let parallaxEnabled = parallaxMode !== 'off';
 
 function applyHeadParallax() {
   if (!parallaxEnabled) {
@@ -330,16 +528,17 @@ function applyHeadParallax() {
     camera.lookAt(0, 0, -20);
     return;
   }
-  const camX = headPos.x * PARALLAX_X;
-  const camY = headPos.y * PARALLAX_Y;
-  const camZ = 8 + headPos.z * PARALLAX_Z;
-
-  camera.position.set(camX, camY, camZ);
+  camera.position.set(
+    headPos.x * PARALLAX_X * parallaxAmount,
+    headPos.y * PARALLAX_Y * parallaxAmount,
+    8 + headPos.z * PARALLAX_Z * parallaxAmount
+  );
   camera.lookAt(0, 0, -20);
 }
 
-// --- Gesture-Driven Game Input ---
-// Pinch spawns a ball at pinch point; release fires with hand velocity (x,y) + gravity
+// ============================================================
+// Gesture-Driven Game Input
+// ============================================================
 function handleGestureInput() {
   for (let h = 0; h < 2; h++) {
     const hs = handStates[h];
@@ -361,7 +560,6 @@ function handleGestureInput() {
         scene.add(mesh);
         hs.heldBall = { mesh, mat, startTime: performance.now(), lastPos: pos.clone(), lastTime: performance.now(), vxHist: [], vyHist: [], svx: 0, svy: 0 };
       } else {
-        // Track velocity via rolling window average
         const now = performance.now();
         const dt = (now - hs.heldBall.lastTime) / 1000;
         if (dt > 0.001) {
@@ -383,7 +581,6 @@ function handleGestureInput() {
       }
     }
 
-    // Release: fire with hand velocity
     if (hs.wasPinching && !hs.pinching && hs.heldBall) {
       const origin = hs.heldBall.mesh.position.clone();
       const vx = hs.heldBall.svx * 0.5;
@@ -394,7 +591,6 @@ function handleGestureInput() {
       hs.heldBall = null;
     }
 
-    // Lost hand while charging: cancel
     if (!hand && hs.heldBall) {
       scene.remove(hs.heldBall.mesh);
       hs.heldBall.mesh.geometry.dispose();
@@ -406,20 +602,37 @@ function handleGestureInput() {
   }
 }
 
-// --- Frame Sending ---
-// Each worker independently tracks when it's ready for a new frame
-// This prevents slow hand detection (especially 2 hands) from blocking face tracking
-const video = document.getElementById('webcam');
+// ============================================================
+// BACKEND: MediaPipe (workers)
+// ============================================================
+let faceWorker = null, handWorker = null;
+let faceReady = false, handReady = false;
 let faceIdle = true, handIdle = true;
 
-function sendFrames(timestamp) {
+function initMediaPipeBackend(numHands) {
+  faceWorker = new Worker('face-worker.js');
+  faceWorker.onmessage = (e) => {
+    if (e.data.type === 'init') { faceReady = true; updateStatus(); }
+    if (e.data.type === 'result') { handleFaceResult(e.data.face); faceIdle = true; }
+  };
+  faceWorker.postMessage({ type: 'init' });
+
+  handWorker = new Worker('hand-worker.js');
+  handWorker.onmessage = (e) => {
+    if (e.data.type === 'init') { handReady = true; updateStatus(); }
+    if (e.data.type === 'result') { handleHandResult(e.data.landmarks); handIdle = true; }
+  };
+  handWorker.postMessage({ type: 'init', numHands });
+}
+
+function sendMediaPipeFrames() {
+  if (document.hidden) return;
   if (!faceReady && !handReady) {
-    video.requestVideoFrameCallback(sendFrames);
+    video.requestVideoFrameCallback(sendMediaPipeFrames);
     return;
   }
   const now = performance.now();
 
-  // Send to face worker if it's ready
   if (faceReady && faceIdle) {
     faceIdle = false;
     createImageBitmap(video, { resizeWidth: 320, resizeHeight: 240 }).then(bmp => {
@@ -427,8 +640,6 @@ function sendFrames(timestamp) {
     });
   }
 
-  // Send to hand worker if it's ready (independent of face)
-  // Downscale to 320x240 for faster hand inference
   if (handReady && handIdle) {
     handIdle = false;
     createImageBitmap(video, { resizeWidth: 320, resizeHeight: 240 }).then(bmp => {
@@ -436,44 +647,137 @@ function sendFrames(timestamp) {
     });
   }
 
-  video.requestVideoFrameCallback(sendFrames);
+  video.requestVideoFrameCallback(sendMediaPipeFrames);
 }
 
-// --- Animation Loop ---
+function teardownMediaPipe() {
+  if (faceWorker) { faceWorker.terminate(); faceWorker = null; }
+  if (handWorker) { handWorker.terminate(); handWorker = null; }
+  faceReady = false; handReady = false;
+  faceIdle = true; handIdle = true;
+}
+
+// ============================================================
+// BACKEND: WebGPU (gpu-vision)
+// ============================================================
+let gpuHandTracker = null;
+let gpuFaceTracker = null;
+let gpuReady = false;
+
+async function initWebGPUBackend() {
+  if (!crossOriginIsolated) {
+    const msg = 'WebGPU needs COOP/COEP headers. Start the server with: npm run dev';
+    statusEl.textContent = msg;
+    console.warn(msg);
+    console.warn('crossOriginIsolated:', crossOriginIsolated);
+    console.warn('Current origin:', location.origin);
+    return false;
+  }
+
+  try {
+    statusEl.textContent = 'Loading WebGPU modules...';
+    const { HandTracker } = await import('./gpu-vision/src/pipeline.js');
+    const { FaceTracker } = await import('./gpu-vision/src/face-pipeline.js');
+
+    gpuHandTracker = new HandTracker();
+    gpuFaceTracker = new FaceTracker(1);
+
+    statusEl.textContent = 'Loading WebGPU hand tracker...';
+    await gpuHandTracker.init((msg) => { statusEl.textContent = msg; });
+
+    statusEl.textContent = 'Loading WebGPU face tracker...';
+    await gpuFaceTracker.init((msg) => { statusEl.textContent = msg; });
+
+    gpuReady = true;
+    return true;
+  } catch (err) {
+    console.error('WebGPU init error:', err);
+    statusEl.textContent = 'WebGPU init failed: ' + err.message;
+    return false;
+  }
+}
+
+// Fire-and-forget: hand and face run independently, never block the render loop
+let gpuHandBusy = false;
+let gpuFaceBusy = false;
+
+function processWebGPUHands() {
+  if (!gpuReady || gpuHandBusy) return;
+  gpuHandBusy = true;
+  gpuHandTracker.processFrame(video).then(result => {
+    if (result.hands && result.hands.length > 0) {
+      handleHandResult(result.hands.map(h => h.landmarks));
+    } else {
+      handleHandResult(null);
+    }
+    gpuHandBusy = false;
+  }).catch(err => {
+    console.error('WebGPU hand error:', err);
+    gpuHandBusy = false;
+  });
+}
+
+function processWebGPUFace() {
+  if (!gpuReady || gpuFaceBusy) return;
+  gpuFaceBusy = true;
+  gpuFaceTracker.processFrame(video, { runBlendshapes: false }).then(result => {
+    if (result.faces && result.faces.length > 0) {
+      const lm = result.faces[0].landmarks;
+      if (lm && lm.length >= 264) {
+        handleFaceResult({
+          keypoints: [
+            { x: lm[263].x, y: lm[263].y },
+            { x: lm[33].x, y: lm[33].y },
+          ]
+        });
+      }
+    }
+    gpuFaceBusy = false;
+  }).catch(err => {
+    console.error('WebGPU face error:', err);
+    gpuFaceBusy = false;
+  });
+}
+
+// ============================================================
+// Frame Sending + Animation Loop
+// ============================================================
+const video = document.getElementById('webcam');
 const clock = new THREE.Clock();
 let frameCount = 0, lastFpsTime = 0, winShowing = false;
+let activeBackend = getSetting('backend');
 
 function animate() {
+  if (document.hidden) return;
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
   const now = performance.now();
 
-  // Head-coupled parallax
-  applyHeadParallax();
-
-  // Gesture input
-  handleGestureInput();
-
-  // Hand skeletons
-  updateHandSkeletons();
-
-  // Animate cubes (gentle rotation)
-  for (const cube of cubes) {
-    cube.rotation.x += 0.003;
-    cube.rotation.y += 0.005;
+  // WebGPU: process frame each loop iteration (self-throttling)
+  if (activeBackend === 'webgpu') {
+    processWebGPUHands();
+    processWebGPUFace();
   }
 
-  // Update projectiles + collision detection
-  const HIT_DIST = 0.8; // collision radius
+  applyHeadParallax();
+  handleGestureInput();
+  updateHandSkeletons();
+
+  for (const cube of cubes) {
+    cube.rotation.x += 0.0008;
+    cube.rotation.y += 0.0012;
+  }
+
+  // Projectiles + collision
+  const HIT_DIST = 0.8;
   for (let i = projectiles.length - 1; i >= 0; i--) {
     const p = projectiles[i];
-    p.vy += GRAVITY_Y * dt; // gravity pulls down
+    p.vy += GRAVITY_Y * dt;
     p.mesh.position.x += p.vx * dt;
     p.mesh.position.y += p.vy * dt;
     p.mesh.position.z += p.vz * dt;
     p.life -= dt;
 
-    // Check collision with cubes
     let hit = false;
     for (let j = cubes.length - 1; j >= 0; j--) {
       if (p.mesh.position.distanceTo(cubes[j].position) < HIT_DIST) {
@@ -513,7 +817,7 @@ function animate() {
     lastFpsTime = now;
   }
 
-  // Update HUD
+  // HUD
   document.getElementById('head-pos').textContent =
     `x:${headPos.x.toFixed(2)} y:${headPos.y.toFixed(2)} z:${headPos.z.toFixed(2)}`;
   const handEl = document.getElementById('hand-state');
@@ -527,24 +831,89 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-// --- Startup ---
+// ============================================================
+// Startup
+// ============================================================
 const statusEl = document.getElementById('status');
+
 function updateStatus() {
-  const parts = [];
-  if (!faceReady) parts.push('Loading face model...');
-  if (!handReady) parts.push('Loading hand model...');
-  if (parts.length === 0) {
-    statusEl.textContent = 'Move your head to shift perspective. Pinch and release to fire.';
-    document.getElementById('hud').style.display = 'block';
-    document.getElementById('controls').style.display = 'block';
-  } else {
-    statusEl.textContent = parts.join(' ');
+  if (activeBackend === 'mediapipe') {
+    const parts = [];
+    if (!faceReady) parts.push('Loading face model...');
+    if (!handReady) parts.push('Loading hand model...');
+    if (parts.length === 0) {
+      statusEl.textContent = 'Move your head to shift perspective. Pinch and release to fire.';
+      document.getElementById('hud').style.display = 'block';
+      document.getElementById('controls').style.display = 'block';
+      document.getElementById('filter-controls').style.display = 'block';
+      document.getElementById('backend-label').textContent = 'MediaPipe';
+    } else {
+      statusEl.textContent = parts.join(' ');
+    }
   }
 }
 
-document.getElementById('num-hands-select').addEventListener('change', (e) => {
+// --- Backend dropdown: hot-swap without reload ---
+let switching = false;
+backendSelect.addEventListener('change', async (e) => {
+  const newBackend = e.target.value;
+  setSetting('backend', newBackend);
+  e.target.blur();
+
+  // If camera hasn't started yet, just save the setting
+  if (!video.srcObject) { activeBackend = newBackend; return; }
+
+  // Prevent double-switching
+  if (switching) return;
+  switching = true;
+  statusEl.textContent = `Switching to ${newBackend === 'webgpu' ? 'WebGPU' : 'MediaPipe'}...`;
+
+  // Clear tracking state
+  currentHands = [null, null];
+  headPos.x = headPos.y = headPos.z = 0;
+  refEyeDist = 0;
+  for (const f of headFilters) f.reset();
+  for (const hand of handFilters) for (const joint of hand) for (const f of joint) f.reset();
+
+  // Tear down current backend
+  if (activeBackend === 'mediapipe') {
+    teardownMediaPipe();
+  } else {
+    gpuReady = false;
+    gpuHandTracker = null;
+    gpuFaceTracker = null;
+  }
+
+  // Start new backend
+  activeBackend = newBackend;
+  if (newBackend === 'webgpu') {
+    const ok = await initWebGPUBackend();
+    if (!ok) {
+      // WebGPU not available, revert to MediaPipe
+      activeBackend = 'mediapipe';
+      backendSelect.value = 'mediapipe';
+      setSetting('backend', 'mediapipe');
+      initMediaPipeBackend(parseInt(getSetting('numHands')));
+      video.requestVideoFrameCallback(sendMediaPipeFrames);
+    } else {
+      statusEl.textContent = 'Move your head to shift perspective. Pinch and release to fire.';
+      document.getElementById('backend-label').textContent = 'WebGPU';
+    }
+  } else {
+    initMediaPipeBackend(parseInt(getSetting('numHands')));
+    video.requestVideoFrameCallback(sendMediaPipeFrames);
+    document.getElementById('backend-label').textContent = 'MediaPipe';
+  }
+
+  switching = false;
+});
+
+// --- Hands dropdown: save + reinit if MediaPipe ---
+numHandsSelect.addEventListener('change', (e) => {
   const numHands = parseInt(e.target.value);
-  if (handWorker) {
+  setSetting('numHands', e.target.value);
+
+  if (activeBackend === 'mediapipe' && handWorker) {
     handWorker.terminate();
     handReady = false;
     handIdle = true;
@@ -557,11 +926,27 @@ document.getElementById('num-hands-select').addEventListener('change', (e) => {
     };
     handWorker.postMessage({ type: 'init', numHands });
   }
+  // WebGPU always tracks 2 hands, dropdown is informational
   e.target.blur();
 });
 
-document.getElementById('parallax-select').addEventListener('change', (e) => {
-  parallaxEnabled = e.target.value === 'on';
+// --- Parallax dropdown ---
+parallaxSelect.addEventListener('change', (e) => {
+  parallaxMode = e.target.value;
+  parallaxEnabled = parallaxMode !== 'off';
+  setSetting('parallax', parallaxMode);
+  if (parallaxMode === 'relative') {
+    // Re-calibrate: current smoothed position becomes new center
+    headOffset.x = headRaw.x;
+    headOffset.y = headRaw.y;
+    headOffset.z = headRaw.z;
+    headPos.x = headPos.y = headPos.z = 0;
+    for (const f of headFilters) f.reset();
+  } else if (parallaxMode === 'raw') {
+    headOffset.x = headOffset.y = headOffset.z = 0;
+    headPos.x = headPos.y = headPos.z = 0;
+    for (const f of headFilters) f.reset();
+  }
   e.target.blur();
 });
 
@@ -577,12 +962,33 @@ async function startCamera() {
     await video.play();
 
     statusEl.textContent = 'Loading ML models...';
-    initWorkers();
 
-    // Start sending frames once video is playing
-    video.requestVideoFrameCallback(sendFrames);
+    if (activeBackend === 'webgpu') {
+      const ok = await initWebGPUBackend();
+      if (ok) {
+        statusEl.textContent = 'Move your head to shift perspective. Pinch and release to fire.';
+        document.getElementById('hud').style.display = 'block';
+        document.getElementById('controls').style.display = 'block';
+        document.getElementById('filter-controls').style.display = 'block';
+        document.getElementById('backend-label').textContent = 'WebGPU';
+      } else {
+        // WebGPU not available, fall back to MediaPipe and persist the change
+        console.warn('WebGPU init failed, falling back to MediaPipe');
+        activeBackend = 'mediapipe';
+        backendSelect.value = 'mediapipe';
+        setSetting('backend', 'mediapipe');
+        initMediaPipeBackend(parseInt(getSetting('numHands')));
+        video.requestVideoFrameCallback(sendMediaPipeFrames);
+        document.getElementById('backend-label').textContent = 'MediaPipe';
+        document.getElementById('hud').style.display = 'block';
+        document.getElementById('controls').style.display = 'block';
+        document.getElementById('filter-controls').style.display = 'block';
+      }
+    } else {
+      initMediaPipeBackend(parseInt(getSetting('numHands')));
+      video.requestVideoFrameCallback(sendMediaPipeFrames);
+    }
 
-    // Start render loop
     animate();
   } catch (err) {
     statusEl.textContent = 'Camera error: ' + err.message;
@@ -594,11 +1000,23 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') startCamera();
 });
 
-// Resize handler
 window.addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+});
+
+// Pause all processing when tab is hidden, resume when visible
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && video.srcObject) {
+    clock.getDelta(); // flush stale dt so projectiles don't teleport
+    frameCount = 0;
+    lastFpsTime = performance.now();
+    requestAnimationFrame(animate);
+    if (activeBackend === 'mediapipe') {
+      video.requestVideoFrameCallback(sendMediaPipeFrames);
+    }
+  }
 });
 
 </script>
