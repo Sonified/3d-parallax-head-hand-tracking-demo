@@ -117,6 +117,9 @@
 
 <video id="webcam" autoplay playsinline style="display:none;"></video>
 
+<!-- Enable crossOriginIsolated on hosts without COOP/COEP headers (e.g. GitHub Pages) -->
+<script src="coi-serviceworker.js"></script>
+
 <script type="importmap">
 { "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
@@ -794,8 +797,8 @@ function animate() {
     const c = cubeData[i];
     if (!c.alive) continue;
     aliveCount++;
-    c.rx += 0.0008;
-    c.ry += 0.0012;
+    c.rx += 0.002;
+    c.ry += 0.003;
     _dummy.position.set(c.x, c.y, c.z);
     _dummy.rotation.set(c.rx, c.ry, 0);
     _dummy.scale.setScalar(1);
