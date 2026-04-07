@@ -172,24 +172,48 @@ const fillLight = new THREE.DirectionalLight(0x4488cc, 0.6);
 fillLight.position.set(-5, 2, 2);
 scene.add(fillLight);
 
-// Grid of cubes
-const cubes = [];
+// Grid of cubes (InstancedMesh for single draw call)
 const cubeGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
+const cubeMat = new THREE.MeshStandardMaterial({ roughness: 0.7, metalness: 0.3 });
 
-function spawnCubes() {
+// Pre-compute grid positions
+function buildCubeData() {
+  const positions = [];
   for (let x = -4; x <= 4; x += 2) {
     for (let y = -1.5; y <= 2.5; y += 2) {
       for (let z = -15; z <= -0.5; z += 2.5) {
-        const hue = (x + 4) / 8;
-        const color = new THREE.Color().setHSL(hue, 0.6, 0.4);
-        const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3 });
-        const cube = new THREE.Mesh(cubeGeo, mat);
-        cube.position.set(x, y, z);
-        scene.add(cube);
-        cubes.push(cube);
+        positions.push({ x, y, z, hue: (x + 4) / 8 });
       }
     }
   }
+  return positions;
+}
+
+let cubeData = []; // {x, y, z, hue, alive} per instance
+let cubesMesh = null;
+const _dummy = new THREE.Object3D();
+const _color = new THREE.Color();
+
+function spawnCubes() {
+  if (cubesMesh) scene.remove(cubesMesh);
+  const grid = buildCubeData();
+  cubeData = grid.map(p => ({ ...p, alive: true, rx: Math.random() * Math.PI * 2, ry: Math.random() * Math.PI * 2 }));
+
+  cubesMesh = new THREE.InstancedMesh(cubeGeo, cubeMat, cubeData.length);
+  cubesMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+  for (let i = 0; i < cubeData.length; i++) {
+    const c = cubeData[i];
+    _dummy.position.set(c.x, c.y, c.z);
+    _dummy.rotation.set(c.rx, c.ry, 0);
+    _dummy.updateMatrix();
+    cubesMesh.setMatrixAt(i, _dummy.matrix);
+    _color.setHSL(c.hue, 0.6, 0.4);
+    cubesMesh.setColorAt(i, _color);
+  }
+  cubesMesh.instanceMatrix.needsUpdate = true;
+  cubesMesh.instanceColor.needsUpdate = true;
+  scene.add(cubesMesh);
 }
 spawnCubes();
 
@@ -763,13 +787,26 @@ function animate() {
   handleGestureInput();
   updateHandSkeletons();
 
-  for (const cube of cubes) {
-    cube.rotation.x += 0.0008;
-    cube.rotation.y += 0.0012;
+  // Rotate cubes + update instanced mesh
+  let aliveCount = 0;
+  let matrixDirty = false;
+  for (let i = 0; i < cubeData.length; i++) {
+    const c = cubeData[i];
+    if (!c.alive) continue;
+    aliveCount++;
+    c.rx += 0.0008;
+    c.ry += 0.0012;
+    _dummy.position.set(c.x, c.y, c.z);
+    _dummy.rotation.set(c.rx, c.ry, 0);
+    _dummy.scale.setScalar(1);
+    _dummy.updateMatrix();
+    cubesMesh.setMatrixAt(i, _dummy.matrix);
+    matrixDirty = true;
   }
+  if (matrixDirty) cubesMesh.instanceMatrix.needsUpdate = true;
 
-  // Projectiles + collision
-  const HIT_DIST = 0.8;
+  // Projectiles + collision (squared distance, no temp vectors)
+  const HIT_DIST_SQ = 0.64; // 0.8^2
   for (let i = projectiles.length - 1; i >= 0; i--) {
     const p = projectiles[i];
     p.vy += GRAVITY_Y * dt;
@@ -779,12 +816,19 @@ function animate() {
     p.life -= dt;
 
     let hit = false;
-    for (let j = cubes.length - 1; j >= 0; j--) {
-      if (p.mesh.position.distanceTo(cubes[j].position) < HIT_DIST) {
-        scene.remove(cubes[j]);
-        cubes[j].geometry.dispose();
-        cubes[j].material.dispose();
-        cubes.splice(j, 1);
+    const px = p.mesh.position.x, py = p.mesh.position.y, pz = p.mesh.position.z;
+    for (let j = 0; j < cubeData.length; j++) {
+      const c = cubeData[j];
+      if (!c.alive) continue;
+      const dx = px - c.x, dy = py - c.y, dz = pz - c.z;
+      if (dx * dx + dy * dy + dz * dz < HIT_DIST_SQ) {
+        c.alive = false;
+        // Hide by scaling to zero
+        _dummy.position.set(0, 0, 0);
+        _dummy.scale.setScalar(0);
+        _dummy.updateMatrix();
+        cubesMesh.setMatrixAt(j, _dummy.matrix);
+        cubesMesh.instanceMatrix.needsUpdate = true;
         hit = true;
         break;
       }
@@ -799,7 +843,7 @@ function animate() {
   }
 
   // Win check
-  if (cubes.length === 0 && !winShowing) {
+  if (aliveCount === 0 && !winShowing) {
     winShowing = true;
     document.getElementById('winner').style.display = 'block';
     setTimeout(() => {
