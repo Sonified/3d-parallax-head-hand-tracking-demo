@@ -1,4 +1,5 @@
 # 👻 Advection with Your Friendly Neighborhood Ghost
+# Author: Robert Alexander
 #
 """
 Ghost advection via ping-pong readback.
@@ -71,7 +72,7 @@ def read_ghost(f_cell, ch):
 # ========================================
 # Multi-cell advection with ping-pong read
 # ========================================
-print('=== GHOST ADVECTION VIA PING-PONG READBACK ===')
+print('=== FGE ADVECTION ===')
 print(f'{N} cells, blob at 10-14, rho=500 momX=150, ghost[{test_ch}]=777')
 print(f'Background: rho=200, ghost=0')
 print()
@@ -233,3 +234,7 @@ final_mass = sum(int(np.sum(f[i])) for i in range(N))
 final_ghost = sum(read_ghost(f[i], test_ch) for i in range(N))
 print(f'Mass:  {final_mass} (want {initial_mass}) drift={100*(final_mass-initial_mass)/initial_mass:.2f}%')
 print(f'Ghost: {final_ghost} (want {initial_ghost_total}) drift={100*(final_ghost-initial_ghost_total)/initial_ghost_total:.2f}%')
+
+if final_mass == initial_mass and final_ghost == initial_ghost_total:
+    print()
+    print("\U0001F47B I'm still here!")

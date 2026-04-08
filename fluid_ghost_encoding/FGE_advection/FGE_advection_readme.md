@@ -1,6 +1,10 @@
-# FG Advection
+# FGE Advection
 
-Does ghost data flow with the fluid?
+**Author:** Robert Alexander
+
+## Significance
+
+This test verifies the central claim of the Fluid Ghost Encoding: that metadata encoded in ghost modes can advect with the fluid velocity field and be conserved exactly over arbitrary simulation lengths. Conventional metadata transport in fluid simulations requires separate advection passes, separate storage buffers, and separate interpolation schemes for each metadata field, consuming additional memory and computation proportional to the number of metadata fields. This test demonstrates that the FGE protocol achieves equivalent transport using zero additional memory, with the metadata riding inside distributions that are already being streamed.
 
 ## What it tests
 

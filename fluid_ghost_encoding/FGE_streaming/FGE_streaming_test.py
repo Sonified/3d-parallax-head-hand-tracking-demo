@@ -1,4 +1,5 @@
 # 👻 Streaming with Your Friendly Neighborhood Ghost
+# Author: Robert Alexander
 #
 """
 Ghost mode streaming test.
@@ -76,9 +77,10 @@ def read_ghost(f_cell, ch):
 # TEST: Stream only (NO collision), then invert
 # =============================================
 random.seed(42)
-print('=== STREAM-ONLY TEST (no collision) ===')
+print('=== FGE STREAMING ===')
 print()
 
+all_recovered = True
 for ch in [12, 13, 14, 15, 16, 17, 18, 10, 11]:
     lcd = ghost_lcds[ch]
     k = kernels[ch]
@@ -207,6 +209,7 @@ for ch in [12, 13, 14, 15, 16, 17, 18, 10, 11]:
                 print(f'      cell {i}: raw={ghost_raw[i]} neighbor_sum={neighbor_sum:.1f} self_rec={self_recovered:.4f} round={recovered} want={ghost_in[i]}')
 
     print(f'    PINGPONG CORRECTION (pre-stream neighbors): {pingpong_correct}/{N}')
+    best_recovery = max(naive, inv, pingpong_correct)
 
     # DIRECT READ FROM PING-PONG: for self=0 channels, just read from f_in
     if abs(c_self) < 0.01:
@@ -219,8 +222,10 @@ for ch in [12, 13, 14, 15, 16, 17, 18, 10, 11]:
             offset = diffs[0]
             offset_correct = sum(1 for i in range(N) if pre_ghost[i] - offset == ghost_in[i])
             print(f'    DIRECT PINGPONG READ (self=0): {direct_correct}/{N}  diffs={unique_diffs}  with offset({offset:+d}): {offset_correct}/{N}')
+            best_recovery = max(best_recovery, offset_correct)
         else:
             print(f'    DIRECT PINGPONG READ (self=0): {direct_correct}/{N}')
+            best_recovery = max(best_recovery, direct_correct)
 
     # CALIBRATED PINGPONG: measure the constant offset and correct
     if abs(c_self) > 0.01 and pingpong_correct < N:
@@ -245,6 +250,7 @@ for ch in [12, 13, 14, 15, 16, 17, 18, 10, 11]:
             if recovered == ghost_in[i]:
                 cal_correct += 1
         print(f'    CALIBRATED PINGPONG (offset={offset:+d}): {cal_correct}/{N}')
+        best_recovery = max(best_recovery, cal_correct)
 
     # SCALED PINGPONG: multiply everything by a scale factor before dividing
     # to get more integer precision in the division
@@ -273,6 +279,10 @@ for ch in [12, 13, 14, 15, 16, 17, 18, 10, 11]:
                 best_scale = scale
         if best_correct > pingpong_correct:
             print(f'    SCALED PINGPONG (x{best_scale}): {best_correct}/{N}')
+            best_recovery = max(best_recovery, best_correct)
+
+    if best_recovery < N:
+        all_recovered = False
 
     # Show first 5 cells detail
     if ch == 12:
@@ -288,3 +298,7 @@ for ch in [12, 13, 14, 15, 16, 17, 18, 10, 11]:
             pre_read = (pre_stream + lcd//2) // lcd
 
             print(f'      cell {i}: injected={ghost_in[i]}  pre_stream_read={pre_read}  predicted={predicted}  actual_raw={actual}  diff={actual-predicted}')
+
+if all_recovered:
+    print()
+    print("\U0001F47B I'm still here!")

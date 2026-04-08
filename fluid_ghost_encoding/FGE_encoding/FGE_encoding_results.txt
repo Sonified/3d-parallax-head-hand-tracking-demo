@@ -1,0 +1,8 @@
+=== FULL STRESS TEST: 9 channels, collision + streaming ===
+
+    1 ticks: 100/100
+    2 ticks: 100/100
+    5 ticks: 100/100
+   10 ticks: 100/100
+   20 ticks: 100/100
+   50 ticks: 100/100

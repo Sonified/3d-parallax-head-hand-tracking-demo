@@ -1,4 +1,5 @@
-# 👻 Injection with Your Friendly Neighborhood Ghost
+# 👻 Data Injection with Your Friendly Neighborhood Ghost
+# Author: Robert Alexander
 #
 """
 Mid-stream ghost injection test.
@@ -74,7 +75,7 @@ for i in range(N):
 omega_num = 5
 omega_den = 10
 
-print('=== MID-STREAM GHOST INJECTION TEST ===')
+print('=== FGE INJECTION ===')
 print(f'{N} cells, uniform rho={rho} momX={ux}, omega={omega_num}/{omega_den}')
 print(f'Ticks 0-9: flow only, no ghosts')
 print(f'Tick 10: INJECT ghost={900} into cells 14-18')
@@ -183,3 +184,7 @@ final_mass = sum(int(np.sum(f[i])) for i in range(N))
 final_ghost = sum(read_ghost(f[i]) for i in range(N))
 print(f'Mass:  {final_mass} drift=0.00%')
 print(f'Ghost: {final_ghost} (want {true_ghost_total}) drift={100*(final_ghost-true_ghost_total)/true_ghost_total:.2f}%')
+
+if final_ghost == true_ghost_total:
+    print()
+    print("\U0001F47B I'm still here!")
