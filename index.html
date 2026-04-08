@@ -27,14 +27,14 @@
   #status {
     position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
     z-index: 10; font-size: 1.2rem; color: #ccc; font-weight: 500;
-    background: rgba(10,10,26,0.8); padding: 8px 16px; border-radius: 6px;
-    border: 1px solid #333; backdrop-filter: blur(8px);
+    background: rgba(10,10,26,0.92); padding: 8px 16px; border-radius: 6px;
+    border: 1px solid #333;
   }
   #controls {
     position: fixed; top: 12px; left: 12px; z-index: 10;
     font-size: 1.04rem; color: #ccc;
-    background: rgba(10,10,26,0.8); padding: 8px 12px; border-radius: 6px;
-    border: 1px solid #333; backdrop-filter: blur(8px); display: none;
+    background: rgba(10,10,26,0.92); padding: 8px 12px; border-radius: 6px;
+    border: 1px solid #333; display: none;
   }
   #controls select {
     background: #111; color: #fff; border: 1px solid #444; border-radius: 3px;
@@ -44,8 +44,8 @@
   #filter-controls {
     position: fixed; top: 12px; right: 12px; z-index: 10;
     font-size: 0.9rem; color: #ccc;
-    background: rgba(10,10,26,0.85); padding: 10px 14px; border-radius: 6px;
-    border: 1px solid #333; backdrop-filter: blur(8px); display: none;
+    background: rgba(10,10,26,0.92); padding: 10px 14px; border-radius: 6px;
+    border: 1px solid #333; display: none;
     min-width: 220px;
   }
   #filter-controls .section-label {
@@ -98,14 +98,15 @@
 
 <div id="filter-controls">
   <div class="section-label" style="display:flex; justify-content:space-between; align-items:center;">Head <button id="recenter-btn" style="background:#222; color:#4fc3f7; border:1px solid #444; border-radius:4px; padding:2px 8px; font-size:0.75rem; cursor:pointer; font-weight:400;">Recenter</button></div>
-  <div class="param-row"><span class="param-name">Floor</span><input type="range" id="head-floor" min="1" max="100" step="1" value="10"><span class="param-val" id="head-floor-val">0.10</span></div>
-  <div class="param-row"><span class="param-name">Beta</span><input type="range" id="head-beta" min="5" max="100" step="1" value="35"><span class="param-val" id="head-beta-val">3.5</span></div>
+  <div class="param-row"><span class="param-name">Model</span><select id="face-mode" style="flex:1; background:#222; color:#ccc; border:1px solid #444; border-radius:3px; padding:1px 4px; font-size:0.75rem;"><option value="landmark">Landmark (478pt, precise)</option><option value="detector">Detector (6pt, fast)</option></select></div>
+  <div class="param-row"><span class="param-name">Floor</span><input type="range" id="head-floor" min="1" max="500" step="1" value="10"><span class="param-val" id="head-floor-val">0.10</span></div>
+  <div class="param-row"><span class="param-name">Beta</span><input type="range" id="head-beta" min="0" max="500" step="1" value="35"><span class="param-val" id="head-beta-val">3.5</span></div>
   <div class="section-label">Parallax</div>
   <div class="param-row"><span class="param-name">Amount</span><input type="range" id="parallax-amount" min="0" max="2" step="0.05" value="0.7"><span class="param-val" id="parallax-amount-val">0.70</span></div>
   <div class="param-row"><span class="param-name">Depth</span><input type="range" id="parallax-depth" min="15" max="80" step="1" value="20"><span class="param-val" id="parallax-depth-val">20</span></div>
   <div class="section-label">Hands</div>
-  <div class="param-row"><span class="param-name">Floor</span><input type="range" id="hand-floor" min="1" max="100" step="1" value="10"><span class="param-val" id="hand-floor-val">0.10</span></div>
-  <div class="param-row"><span class="param-name">Beta</span><input type="range" id="hand-beta" min="5" max="100" step="1" value="35"><span class="param-val" id="hand-beta-val">3.5</span></div>
+  <div class="param-row"><span class="param-name">Floor</span><input type="range" id="hand-floor" min="1" max="500" step="1" value="10"><span class="param-val" id="hand-floor-val">0.10</span></div>
+  <div class="param-row"><span class="param-name">Beta</span><input type="range" id="hand-beta" min="0" max="500" step="1" value="35"><span class="param-val" id="hand-beta-val">3.5</span></div>
   <div style="text-align:right; margin-top:8px;"><button id="copy-settings-btn" style="background:#222; color:#4fc3f7; border:1px solid #444; border-radius:4px; padding:3px 10px; font-size:0.8rem; cursor:pointer;">Copy</button></div>
 </div>
 
@@ -501,7 +502,11 @@ const headOffset = { x: 0, y: 0, z: 0 }; // subtracted from raw to recenter
 const headRaw = { x: 0, y: 0, z: 0 };    // last raw values before offset
 let headCalibrated = false;               // auto-recenter on first detection in relative mode
 let faceKeypoints = null;                 // latest eye keypoints for self-view overlay
-let headDetected = false;
+let headLastSeen = 0;
+const HEAD_TIMEOUT = 300;
+let handLastSeen = 0;
+let lastHandCount = 0;
+const HAND_TIMEOUT = 300;
 
 const PARALLAX_X = 6;
 const PARALLAX_Y = 4;
@@ -622,9 +627,9 @@ function handleFaceResult(face) {
   if (!face) return;
   const kp = face.keypoints;
   faceKeypoints = kp;
-  headDetected = true;
   const leftEye = kp[0], rightEye = kp[1];
   const now = performance.now();
+  headLastSeen = now;
 
   headRaw.x = -((leftEye.x + rightEye.x) / 2 - 0.5) * 2;
   headRaw.y = -((leftEye.y + rightEye.y) / 2 - 0.5) * 2;
@@ -656,6 +661,11 @@ function handleFaceResult(face) {
 
 function handleHandResult(landmarks) {
   const now = performance.now();
+  const visibleHandCount = landmarks ? Math.min(landmarks.length, 2) : 0;
+  if (visibleHandCount > 0) {
+    handLastSeen = now;
+    lastHandCount = visibleHandCount;
+  }
   for (let h = 0; h < 2; h++) {
     if (!landmarks || h >= landmarks.length) {
       currentHands[h] = null;
@@ -778,7 +788,7 @@ function initMediaPipeBackend(numHands) {
   faceWorker = new Worker('face-worker.js');
   faceWorker.onmessage = (e) => {
     if (e.data.type === 'init') { faceReady = true; updateStatus(); }
-    if (e.data.type === 'result') { if (!e.data.face) headDetected = false; handleFaceResult(e.data.face); faceIdle = true; }
+    if (e.data.type === 'result') { handleFaceResult(e.data.face); faceIdle = true; }
   };
   faceWorker.postMessage({ type: 'init' });
 
@@ -866,10 +876,39 @@ async function initWebGPUBackend() {
 let gpuHandBusy = false;
 let gpuFaceBusy = false;
 
+// Benchmark tracking
+const _bench = {
+  handLatencies: [], faceLatencies: [], handCount: 0, faceCount: 0,
+  lastReport: 0, interval: 5000,
+  report(now) {
+    if (now - this.lastReport < this.interval) return;
+    this.lastReport = now;
+    if (this.handLatencies.length > 0) {
+      const sorted = [...this.handLatencies].sort((a,b) => a - b);
+      const mean = sorted.reduce((a,b) => a+b,0) / sorted.length;
+      const max = sorted[sorted.length - 1];
+      const p95 = sorted[Math.floor(sorted.length * 0.95)];
+      console.log(`[BENCH] Hand: ${mean.toFixed(1)}ms mean, ${p95.toFixed(1)}ms p95, ${max.toFixed(1)}ms max (${sorted.length} samples)`);
+    }
+    if (this.faceLatencies.length > 0) {
+      const sorted = [...this.faceLatencies].sort((a,b) => a - b);
+      const mean = sorted.reduce((a,b) => a+b,0) / sorted.length;
+      const max = sorted[sorted.length - 1];
+      const p95 = sorted[Math.floor(sorted.length * 0.95)];
+      console.log(`[BENCH] Face: ${mean.toFixed(1)}ms mean, ${p95.toFixed(1)}ms p95, ${max.toFixed(1)}ms max (${sorted.length} samples)`);
+    }
+    this.handLatencies = [];
+    this.faceLatencies = [];
+  }
+};
+
 function processWebGPUHands() {
   if (!gpuReady || gpuHandBusy) return;
   gpuHandBusy = true;
+  const t0 = performance.now();
   gpuHandTracker.processFrame(video).then(result => {
+    const latency = performance.now() - t0;
+    _bench.handLatencies.push(latency);
     if (result.hands && result.hands.length > 0) {
       handleHandResult(result.hands.map(h => h.landmarks));
     } else {
@@ -882,10 +921,44 @@ function processWebGPUHands() {
   });
 }
 
+let faceMode = 'landmark'; // 'landmark' or 'detector'
+document.getElementById('face-mode').addEventListener('change', (e) => {
+  faceMode = e.target.value;
+  console.log('[BENCH] Face mode switched to:', faceMode);
+});
+
 function processWebGPUFace() {
   if (!gpuReady || gpuFaceBusy) return;
   gpuFaceBusy = true;
+  const t0 = performance.now();
+
+  if (faceMode === 'detector') {
+    // Detector-only: run BlazeFace every frame, use its 6 keypoints directly
+    createImageBitmap(video).then(bitmap => {
+      gpuFaceTracker.detectWorker.detect(bitmap).then(result => {
+        const latency = performance.now() - t0;
+        _bench.faceLatencies.push(latency);
+        if (result.detections && result.detections.length > 0) {
+          const det = result.detections[0];
+          const lb = result.letterbox;
+          // Undo letterbox on keypoints
+          const kps = det.keypoints.map(kp => ({
+            x: (kp.x - lb.offsetX) / lb.scaleX,
+            y: (kp.y - lb.offsetY) / lb.scaleY,
+        }));
+          // keypoints[0] = left eye, keypoints[1] = right eye
+          handleFaceResult({ keypoints: [kps[0], kps[1]] });
+        }
+        gpuFaceBusy = false;
+      }).catch(err => { console.error('WebGPU face detect error:', err); gpuFaceBusy = false; });
+    });
+    return;
+  }
+
+  // Landmark mode (full 478-point model)
   gpuFaceTracker.processFrame(video, { runBlendshapes: false }).then(result => {
+    const latency = performance.now() - t0;
+    _bench.faceLatencies.push(latency);
     if (result.faces && result.faces.length > 0) {
       const lm = result.faces[0].landmarks;
       if (lm && lm.length >= 264) {
@@ -895,8 +968,8 @@ function processWebGPUFace() {
             { x: lm[33].x, y: lm[33].y },
           ]
         });
-      } else { headDetected = false; }
-    } else { headDetected = false; }
+      }
+    }
     gpuFaceBusy = false;
   }).catch(err => {
     console.error('WebGPU face error:', err);
@@ -1002,26 +1075,32 @@ function animate(timestamp) {
     frameCount = 0;
     lastFpsTime = now;
   }
+  if (activeBackend === 'webgpu') _bench.report(now);
 
-  // HUD -- throttle to 10fps to avoid DOM thrash causing flicker
+  // HUD -- throttle to 10fps and use last-seen timeouts to smooth async ML gaps
   if (!animate._lastHud || now - animate._lastHud > 100) {
     animate._lastHud = now;
     const headEl = document.getElementById('head-pos');
+    const headDetected = now - headLastSeen <= HEAD_TIMEOUT;
     if (headDetected) {
       headEl.textContent = `x:${headPos.x.toFixed(2)} y:${headPos.y.toFixed(2)} z:${headPos.z.toFixed(2)}`;
       headEl.style.color = '';
-      headEl._lastSeen = now;
-    } else if (!headEl._lastSeen || now - headEl._lastSeen > 500) {
+    } else {
       headEl.textContent = 'Not found';
       headEl.style.color = '#ff4444';
+      faceKeypoints = null;
     }
     const handEl = document.getElementById('hand-state');
     const numHands = currentHands.filter(h => h).length;
     if (numHands) {
+      handLastSeen = now;
+      lastHandCount = numHands;
       handEl.textContent = `${numHands} hand${numHands > 1 ? 's' : ''}`;
-      handEl._lastSeen = now;
-    } else if (!handEl._lastSeen || now - handEl._lastSeen > 500) {
+    } else if (now - handLastSeen <= HAND_TIMEOUT && lastHandCount > 0) {
+      handEl.textContent = `${lastHandCount} hand${lastHandCount > 1 ? 's' : ''}`;
+    } else {
       handEl.textContent = 'No hand';
+      lastHandCount = 0;
     }
     const gestureEl = document.getElementById('gesture-state');
     const gestures = handStates.filter((hs, i) => currentHands[i]).map(hs => hs.pinching ? 'PINCH' : 'OPEN');
@@ -1075,6 +1154,10 @@ backendSelect.addEventListener('change', async (e) => {
   currentHands = [null, null];
   headPos.x = headPos.y = headPos.z = 0;
   refEyeDist = 0;
+  faceKeypoints = null;
+  headLastSeen = 0;
+  handLastSeen = 0;
+  lastHandCount = 0;
   for (const f of headFilters) f.reset();
   for (const hand of handFilters) for (const joint of hand) for (const f of joint) f.reset();
 
@@ -1121,6 +1204,8 @@ numHandsSelect.addEventListener('change', (e) => {
     handReady = false;
     handIdle = true;
     currentHands = [null, null];
+    handLastSeen = 0;
+    lastHandCount = 0;
     statusEl.textContent = 'Reloading hand model...';
     handWorker = new Worker('hand-worker.js');
     handWorker.onmessage = (ev) => {
