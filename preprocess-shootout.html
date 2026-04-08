@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Preprocessing Shootout</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; margin: 20px; }
+  video { width: 240px; border: 1px solid #333; }
+  button { font-size: 16px; padding: 8px 16px; margin: 10px 4px; cursor: pointer; }
+  table { border-collapse: collapse; margin-top: 20px; }
+  th, td { border: 1px solid #444; padding: 6px 12px; text-align: right; }
+  th { background: #222; }
+  .best { color: #0f0; font-weight: bold; }
+  .worst { color: #f44; }
+  #status { margin: 10px 0; color: #aaa; }
+  #log { margin-top: 10px; font-size: 12px; color: #888; max-height: 200px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h2>Preprocess Shootout</h2>
+<p>Measures camera frame to GPU-ready tensor time for different strategies.</p>
+<video id="video" autoplay playsinline muted></video>
+<br>
+<button id="start-btn">Start Camera</button>
+<button id="run-btn" disabled>Run Shootout (100 frames each)</button>
+<div id="status"></div>
+<table id="results" style="display:none">
+  <thead>
+    <tr>
+      <th>Strategy</th>
+      <th>Avg (ms)</th>
+      <th>Median (ms)</th>
+      <th>P95 (ms)</th>
+      <th>Min (ms)</th>
+      <th>Max (ms)</th>
+    </tr>
+  </thead>
+  <tbody id="results-body"></tbody>
+</table>
+<div id="log"></div>
+
+<script type="module">
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('start-btn');
+const runBtn = document.getElementById('run-btn');
+const resultsTable = document.getElementById('results');
+const resultsBody = document.getElementById('results-body');
+const logEl = document.getElementById('log');
+
+const PALM_SIZE = 192;
+const FACE_SIZE = 128;
+const FRAMES = 100;
+
+let gpuDevice = null;
+let palmPipeline = null;
+let facePipeline = null;
+let palmOutputBuffer = null;
+let faceOutputBuffer = null;
+let palmReadBuffer = null;
+let faceReadBuffer = null;
+let uniformBuffer = null;
+let sampler = null;
+
+function log(msg) {
+  const line = document.createElement('div');
+  line.textContent = msg;
+  logEl.prepend(line);
+}
+
+function makeLetterboxShader(size) {
+  return `
+struct Uniforms {
+  scale: f32, offset_x: f32, offset_y: f32, src_w: f32, src_h: f32,
+}
+@group(0) @binding(0) var srcTexture: texture_2d<f32>;
+@group(0) @binding(1) var srcSampler: sampler;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> u: Uniforms;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let x = gid.x; let y = gid.y;
+  if (x >= ${size}u || y >= ${size}u) { return; }
+  let fx = f32(x) + 0.5; let fy = f32(y) + 0.5;
+  let sx = (fx - u.offset_x) / u.scale;
+  let sy = (fy - u.offset_y) / u.scale;
+  var r = 0.0; var g = 0.0; var b = 0.0;
+  if (sx >= 0.0 && sx < u.src_w && sy >= 0.0 && sy < u.src_h) {
+    let uv = vec2f(sx / u.src_w, sy / u.src_h);
+    let pixel = textureSampleLevel(srcTexture, srcSampler, uv, 0.0);
+    r = pixel.r; g = pixel.g; b = pixel.b;
+  }
+  let idx = (y * ${size}u + x) * 3u;
+  output[idx] = r; output[idx + 1u] = g; output[idx + 2u] = b;
+}`;
+}
+
+async function initGPU() {
+  const adapter = await navigator.gpu.requestAdapter();
+  gpuDevice = await adapter.requestDevice();
+
+  palmPipeline = gpuDevice.createComputePipeline({
+    layout: 'auto',
+    compute: { module: gpuDevice.createShaderModule({ code: makeLetterboxShader(PALM_SIZE) }), entryPoint: 'main' },
+  });
+  facePipeline = gpuDevice.createComputePipeline({
+    layout: 'auto',
+    compute: { module: gpuDevice.createShaderModule({ code: makeLetterboxShader(FACE_SIZE) }), entryPoint: 'main' },
+  });
+
+  const palmBytes = PALM_SIZE * PALM_SIZE * 3 * 4;
+  const faceBytes = FACE_SIZE * FACE_SIZE * 3 * 4;
+  palmOutputBuffer = gpuDevice.createBuffer({ size: palmBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  palmReadBuffer = gpuDevice.createBuffer({ size: palmBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  faceOutputBuffer = gpuDevice.createBuffer({ size: faceBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  faceReadBuffer = gpuDevice.createBuffer({ size: faceBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  uniformBuffer = gpuDevice.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  sampler = gpuDevice.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+  log('WebGPU initialized');
+}
+
+async function gpuLetterbox(bitmap, targetSize, pipeline, outBuf, readBuf) {
+  const srcW = bitmap.width, srcH = bitmap.height;
+  const scale = targetSize / Math.max(srcW, srcH);
+  const dstW = Math.round(srcW * scale), dstH = Math.round(srcH * scale);
+  const offsetX = (targetSize - dstW) / 2, offsetY = (targetSize - dstH) / 2;
+
+  const srcTexture = gpuDevice.createTexture({
+    size: [srcW, srcH], format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  gpuDevice.queue.copyExternalImageToTexture({ source: bitmap }, { texture: srcTexture }, [srcW, srcH]);
+  gpuDevice.queue.writeBuffer(uniformBuffer, 0, new Float32Array([scale, offsetX, offsetY, srcW, srcH, 0, 0, 0]));
+
+  const bindGroup = gpuDevice.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: srcTexture.createView() },
+      { binding: 1, resource: sampler },
+      { binding: 2, resource: { buffer: outBuf } },
+      { binding: 3, resource: { buffer: uniformBuffer } },
+    ],
+  });
+
+  const encoder = gpuDevice.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(Math.ceil(targetSize / 16), Math.ceil(targetSize / 16));
+  pass.end();
+  encoder.copyBufferToBuffer(outBuf, 0, readBuf, 0, targetSize * targetSize * 3 * 4);
+  gpuDevice.queue.submit([encoder.finish()]);
+
+  await readBuf.mapAsync(GPUMapMode.READ);
+  const data = new Float32Array(readBuf.getMappedRange().slice(0));
+  readBuf.unmap();
+  srcTexture.destroy();
+  return data;
+}
+
+// ---- Canvas letterbox (MediaPipe-style CPU path) ----
+const mpCanvas = new OffscreenCanvas(PALM_SIZE, PALM_SIZE);
+const mpCtx = mpCanvas.getContext('2d', { willReadFrequently: true });
+
+function canvasLetterbox(bitmap) {
+  const srcW = bitmap.width, srcH = bitmap.height;
+  const scale = PALM_SIZE / Math.max(srcW, srcH);
+  const dstW = Math.round(srcW * scale), dstH = Math.round(srcH * scale);
+  const offsetX = (PALM_SIZE - dstW) / 2, offsetY = (PALM_SIZE - dstH) / 2;
+
+  mpCtx.fillStyle = '#000';
+  mpCtx.fillRect(0, 0, PALM_SIZE, PALM_SIZE);
+  mpCtx.drawImage(bitmap, offsetX, offsetY, dstW, dstH);
+
+  const imageData = mpCtx.getImageData(0, 0, PALM_SIZE, PALM_SIZE);
+  const rgba = imageData.data;
+  const data = new Float32Array(PALM_SIZE * PALM_SIZE * 3);
+  for (let i = 0; i < PALM_SIZE * PALM_SIZE; i++) {
+    data[i * 3]     = rgba[i * 4]     / 255;
+    data[i * 3 + 1] = rgba[i * 4 + 1] / 255;
+    data[i * 3 + 2] = rgba[i * 4 + 2] / 255;
+  }
+  return data;
+}
+
+// ---- STRATEGIES ----
+
+// A: Current approach - createImageBitmap resize 320x240 on main thread, then GPU letterbox
+async function strategyA_current() {
+  const t0 = performance.now();
+  const bmp = await createImageBitmap(video, { resizeWidth: 320, resizeHeight: 240 });
+  await gpuLetterbox(bmp, PALM_SIZE, palmPipeline, palmOutputBuffer, palmReadBuffer);
+  bmp.close();
+  return performance.now() - t0;
+}
+
+// B: Skip resize - send full frame, GPU letterbox does everything
+async function strategyB_fullFrame() {
+  const t0 = performance.now();
+  const bmp = await createImageBitmap(video);
+  await gpuLetterbox(bmp, PALM_SIZE, palmPipeline, palmOutputBuffer, palmReadBuffer);
+  bmp.close();
+  return performance.now() - t0;
+}
+
+// C: Resize to model size directly - createImageBitmap to 192x192, GPU letterbox is near no-op
+async function strategyC_modelSize() {
+  const t0 = performance.now();
+  const bmp = await createImageBitmap(video, { resizeWidth: 192, resizeHeight: 192 });
+  await gpuLetterbox(bmp, PALM_SIZE, palmPipeline, palmOutputBuffer, palmReadBuffer);
+  bmp.close();
+  return performance.now() - t0;
+}
+
+// D: VideoFrame zero-copy transfer + GPU letterbox
+async function strategyD_videoFrame() {
+  const t0 = performance.now();
+  const frame = new VideoFrame(video);
+  const bmp = await createImageBitmap(frame);
+  frame.close();
+  await gpuLetterbox(bmp, PALM_SIZE, palmPipeline, palmOutputBuffer, palmReadBuffer);
+  bmp.close();
+  return performance.now() - t0;
+}
+
+// E: Full frame + GPU letterbox to 128 (face detection size)
+async function strategyE_faceSize() {
+  const t0 = performance.now();
+  const bmp = await createImageBitmap(video);
+  await gpuLetterbox(bmp, FACE_SIZE, facePipeline, faceOutputBuffer, faceReadBuffer);
+  bmp.close();
+  return performance.now() - t0;
+}
+
+// F: MediaPipe-style canvas path (the old way: drawImage + getImageData + CPU float loop)
+async function strategyF_mediapipeCanvas() {
+  const t0 = performance.now();
+  const bmp = await createImageBitmap(video, { resizeWidth: 320, resizeHeight: 240 });
+  canvasLetterbox(bmp);
+  bmp.close();
+  return performance.now() - t0;
+}
+
+// G: MediaPipe canvas but from full frame (no pre-resize)
+async function strategyG_mediapipeFullFrame() {
+  const t0 = performance.now();
+  const bmp = await createImageBitmap(video);
+  canvasLetterbox(bmp);
+  bmp.close();
+  return performance.now() - t0;
+}
+
+const strategies = [
+  { name: 'F: Canvas drawImage+getImageData (MediaPipe old)', fn: strategyF_mediapipeCanvas },
+  { name: 'G: Canvas full frame (MediaPipe, no pre-resize)', fn: strategyG_mediapipeFullFrame },
+  { name: 'A: Resize 320x240 + GPU letterbox (current)', fn: strategyA_current },
+  { name: 'B: Full frame + GPU letterbox', fn: strategyB_fullFrame },
+  { name: 'C: Resize 192x192 + GPU letterbox', fn: strategyC_modelSize },
+  { name: 'D: VideoFrame + GPU letterbox', fn: strategyD_videoFrame },
+  { name: 'E: Full frame + GPU letterbox to 128', fn: strategyE_faceSize },
+];
+
+function stats(times) {
+  const sorted = [...times].sort((a, b) => a - b);
+  const avg = times.reduce((a, b) => a + b, 0) / times.length;
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const p95 = sorted[Math.floor(sorted.length * 0.95)];
+  return {
+    avg: avg.toFixed(2),
+    median: median.toFixed(2),
+    p95: p95.toFixed(2),
+    min: sorted[0].toFixed(2),
+    max: sorted[sorted.length - 1].toFixed(2),
+  };
+}
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  statusEl.textContent = 'Starting camera + GPU...';
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 360 }, latencyMode: 'realtime' }
+  });
+  video.srcObject = stream;
+  await video.play();
+  log(`Camera: ${video.videoWidth}x${video.videoHeight}`);
+
+  await initGPU();
+
+  statusEl.textContent = 'Ready. Hit Run.';
+  runBtn.disabled = false;
+});
+
+runBtn.addEventListener('click', async () => {
+  runBtn.disabled = true;
+  resultsBody.innerHTML = '';
+  resultsTable.style.display = 'table';
+
+  const allResults = [];
+
+  for (const strat of strategies) {
+    statusEl.textContent = `Running: ${strat.name} (${FRAMES} frames)...`;
+    log(`Starting: ${strat.name}`);
+
+    // Warmup
+    for (let i = 0; i < 5; i++) await strat.fn();
+
+    const times = [];
+    for (let i = 0; i < FRAMES; i++) {
+      // Wait for a real new frame
+      await new Promise(r => video.requestVideoFrameCallback(r));
+      const t = await strat.fn();
+      times.push(t);
+    }
+
+    const s = stats(times);
+    allResults.push({ name: strat.name, ...s, avgNum: parseFloat(s.avg) });
+    log(`${strat.name}: avg=${s.avg}ms median=${s.median}ms p95=${s.p95}ms`);
+  }
+
+  // Find best avg
+  const bestAvg = Math.min(...allResults.map(r => r.avgNum));
+  const worstAvg = Math.max(...allResults.map(r => r.avgNum));
+
+  for (const r of allResults) {
+    const row = document.createElement('tr');
+    const cls = r.avgNum === bestAvg ? 'best' : r.avgNum === worstAvg ? 'worst' : '';
+    row.innerHTML = `
+      <td style="text-align:left">${r.name}</td>
+      <td class="${cls}">${r.avg}</td>
+      <td>${r.median}</td>
+      <td>${r.p95}</td>
+      <td>${r.min}</td>
+      <td>${r.max}</td>
+    `;
+    resultsBody.appendChild(row);
+  }
+
+  statusEl.textContent = 'Done! Green = fastest avg, Red = slowest.';
+  runBtn.disabled = false;
+});
+</script>
+</body>
+</html>

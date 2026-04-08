@@ -12,7 +12,7 @@
     position: fixed; bottom: 16px; left: 16px; z-index: 10;
     font-size: 1.1rem; line-height: 1.6; color: #ccc;
     background: rgba(10,10,26,0.8); padding: 12px 16px; border-radius: 8px;
-    border: 1px solid #333; backdrop-filter: blur(8px); max-width: 400px;
+    border: 1px solid #333; width: 310px; will-change: transform;
   }
   #hud .label { color: #888; }
   #hud .val { color: #4fc3f7; font-weight: 600; }
@@ -116,10 +116,11 @@
   <div><span class="label">Head: </span><span id="head-pos" class="val">--</span></div>
   <div><span class="label">Hand: </span><span id="hand-state" class="val">--</span></div>
   <div><span class="label">Gesture: </span><span id="gesture-state" class="val">--</span></div>
-  <div><span class="label">FPS: </span><span id="fps" class="val">--</span> <button id="fps-cap-btn" style="background:#222; color:#888; border:1px solid #444; border-radius:3px; padding:1px 6px; font-size:0.7rem; cursor:pointer; margin-left:6px;">Cap</button></div>
+  <div><span class="label">FPS: </span><span id="fps" class="val">--</span></div>
   <div><span class="label">Backend: </span><span id="backend-label" class="val">--</span></div>
-  <div style="margin-top:6px;"><button id="self-view-btn" style="background:#222; color:#888; border:1px solid #444; border-radius:4px; padding:3px 10px; font-size:0.8rem; cursor:pointer; width:100%;">Self View</button></div>
 </div>
+
+<button id="self-view-btn" style="position:fixed; bottom:16px; right:16px; z-index:11; background:#222; color:#888; border:1px solid #444; border-radius:4px; padding:6px 14px; font-size:0.85rem; cursor:pointer; display:none;">Self View</button>
 
 <div id="winner" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:20; font-size:4rem; font-weight:700; color:#fff; font-family:system-ui,sans-serif;">You Win!</div>
 
@@ -161,7 +162,7 @@ numHandsSelect.value = getSetting('numHands');
 // 3D Scene Setup
 // ============================================================
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x151528);
+scene.background = new THREE.Color(0x0a0a1a);
 scene.fog = new THREE.FogExp2(0x0a0a1a, 0.015);
 
 const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
@@ -186,10 +187,10 @@ fillLight.position.set(-5, 2, 2);
 scene.add(fillLight);
 
 // Background grid for depth perception
-const bgGridZ = -25;
-const bgGridMat = new THREE.LineBasicMaterial({ color: 0x2a3a55, opacity: 0.4, transparent: true });
+const bgGridZ = -32;
+const bgGridMat = new THREE.LineBasicMaterial({ color: 0x4fc3f7, opacity: 0.25, transparent: true, fog: false });
 const bgGridGroup = new THREE.Group();
-const gridSpan = 20;
+const gridSpan = 60;
 const gridStep = 2;
 for (let i = -gridSpan; i <= gridSpan; i += gridStep) {
   // Vertical lines
@@ -232,7 +233,12 @@ const _color = new THREE.Color();
 function spawnCubes() {
   if (cubesMesh) scene.remove(cubesMesh);
   const grid = buildCubeData();
-  cubeData = grid.map(p => ({ ...p, alive: true, rx: Math.random() * Math.PI * 2, ry: Math.random() * Math.PI * 2 }));
+  cubeData = grid.map(p => {
+    // Depth index: 0 at front, increasing toward back
+    const depthIdx = Math.round((-0.5 - p.z) / 2.5); // 0, 1, 2, 3, 4, 5
+    const speed = 1 + depthIdx * 0.05; // back rows rotate progressively faster
+    return { ...p, alive: true, rx: 0, ry: 0, rotSpeed: speed };
+  });
 
   cubesMesh = new THREE.InstancedMesh(cubeGeo, cubeMat, cubeData.length);
   cubesMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -495,6 +501,7 @@ const headOffset = { x: 0, y: 0, z: 0 }; // subtracted from raw to recenter
 const headRaw = { x: 0, y: 0, z: 0 };    // last raw values before offset
 let headCalibrated = false;               // auto-recenter on first detection in relative mode
 let faceKeypoints = null;                 // latest eye keypoints for self-view overlay
+let headDetected = false;
 
 const PARALLAX_X = 6;
 const PARALLAX_Y = 4;
@@ -538,7 +545,12 @@ function updateSelfViewBtn() {
   selfViewBtn.style.color = selfViewVisible ? '#4fc3f7' : '#888';
   selfViewEl.style.display = selfViewVisible ? 'block' : 'none';
 }
-updateSelfViewBtn();
+
+function initSelfViewBtn() {
+  selfViewBtn.textContent = selfViewVisible ? 'Hide Self' : 'Self View';
+  selfViewBtn.style.color = selfViewVisible ? '#4fc3f7' : '#888';
+  if (selfViewVisible) selfViewEl.style.display = 'block';
+}
 
 selfViewBtn.addEventListener('click', () => {
   selfViewVisible = !selfViewVisible;
@@ -610,6 +622,7 @@ function handleFaceResult(face) {
   if (!face) return;
   const kp = face.keypoints;
   faceKeypoints = kp;
+  headDetected = true;
   const leftEye = kp[0], rightEye = kp[1];
   const now = performance.now();
 
@@ -765,7 +778,7 @@ function initMediaPipeBackend(numHands) {
   faceWorker = new Worker('face-worker.js');
   faceWorker.onmessage = (e) => {
     if (e.data.type === 'init') { faceReady = true; updateStatus(); }
-    if (e.data.type === 'result') { handleFaceResult(e.data.face); faceIdle = true; }
+    if (e.data.type === 'result') { if (!e.data.face) headDetected = false; handleFaceResult(e.data.face); faceIdle = true; }
   };
   faceWorker.postMessage({ type: 'init' });
 
@@ -882,8 +895,8 @@ function processWebGPUFace() {
             { x: lm[33].x, y: lm[33].y },
           ]
         });
-      }
-    }
+      } else { headDetected = false; }
+    } else { headDetected = false; }
     gpuFaceBusy = false;
   }).catch(err => {
     console.error('WebGPU face error:', err);
@@ -899,29 +912,10 @@ const clock = new THREE.Clock();
 let frameCount = 0, lastFpsTime = 0, winShowing = false;
 let activeBackend = getSetting('backend');
 
-// FPS cap
-let fpsCapped = getSetting('fpsCap') === 'true';
-const FPS_CAP = 120;
-const FRAME_MIN_MS = 1000 / FPS_CAP;
-let lastFrameTime = 0;
-
-const fpsCapBtn = document.getElementById('fps-cap-btn');
-function updateCapBtn() {
-  fpsCapBtn.textContent = fpsCapped ? 'Uncap' : 'Cap';
-  fpsCapBtn.style.color = fpsCapped ? '#4fc3f7' : '#888';
-}
-updateCapBtn();
-fpsCapBtn.addEventListener('click', () => {
-  fpsCapped = !fpsCapped;
-  setSetting('fpsCap', fpsCapped.toString());
-  updateCapBtn();
-});
 
 function animate(timestamp) {
   if (document.hidden) return;
   requestAnimationFrame(animate);
-  if (fpsCapped && timestamp - lastFrameTime < FRAME_MIN_MS) return;
-  lastFrameTime = timestamp;
   const dt = clock.getDelta();
   const now = performance.now();
 
@@ -942,8 +936,8 @@ function animate(timestamp) {
     const c = cubeData[i];
     if (!c.alive) continue;
     aliveCount++;
-    c.rx += 0.002;
-    c.ry += 0.003;
+    c.rx += 0.001 * c.rotSpeed;
+    c.ry += 0.003 * c.rotSpeed;
     _dummy.position.set(c.x, c.y, c.z);
     _dummy.rotation.set(c.rx, c.ry, 0);
     _dummy.scale.setScalar(1);
@@ -1009,16 +1003,31 @@ function animate(timestamp) {
     lastFpsTime = now;
   }
 
-  // HUD
-  document.getElementById('head-pos').textContent =
-    `x:${headPos.x.toFixed(2)} y:${headPos.y.toFixed(2)} z:${headPos.z.toFixed(2)}`;
-  const handEl = document.getElementById('hand-state');
-  const numHands = currentHands.filter(h => h).length;
-  handEl.textContent = numHands ? `${numHands} hand${numHands > 1 ? 's' : ''}` : 'No hand';
-  const gestureEl = document.getElementById('gesture-state');
-  const gestures = handStates.filter((hs, i) => currentHands[i]).map(hs => hs.pinching ? 'PINCH' : 'OPEN');
-  gestureEl.textContent = gestures.join(' / ') || '--';
-  gestureEl.className = 'val ' + (gestures.includes('PINCH') ? 'pinch' : 'open');
+  // HUD -- throttle to 10fps to avoid DOM thrash causing flicker
+  if (!animate._lastHud || now - animate._lastHud > 100) {
+    animate._lastHud = now;
+    const headEl = document.getElementById('head-pos');
+    if (headDetected) {
+      headEl.textContent = `x:${headPos.x.toFixed(2)} y:${headPos.y.toFixed(2)} z:${headPos.z.toFixed(2)}`;
+      headEl.style.color = '';
+      headEl._lastSeen = now;
+    } else if (!headEl._lastSeen || now - headEl._lastSeen > 500) {
+      headEl.textContent = 'Not found';
+      headEl.style.color = '#ff4444';
+    }
+    const handEl = document.getElementById('hand-state');
+    const numHands = currentHands.filter(h => h).length;
+    if (numHands) {
+      handEl.textContent = `${numHands} hand${numHands > 1 ? 's' : ''}`;
+      handEl._lastSeen = now;
+    } else if (!handEl._lastSeen || now - handEl._lastSeen > 500) {
+      handEl.textContent = 'No hand';
+    }
+    const gestureEl = document.getElementById('gesture-state');
+    const gestures = handStates.filter((hs, i) => currentHands[i]).map(hs => hs.pinching ? 'PINCH' : 'OPEN');
+    gestureEl.textContent = gestures.join(' / ') || '--';
+    gestureEl.className = 'val ' + (gestures.includes('PINCH') ? 'pinch' : 'open');
+  }
 
   if (selfViewVisible) drawSelfView();
 
@@ -1037,7 +1046,7 @@ function updateStatus() {
     if (!handReady) parts.push('Loading hand model...');
     if (parts.length === 0) {
       statusEl.textContent = 'Move your head to shift perspective. Pinch and release to fire.';
-      document.getElementById('hud').style.display = 'block';
+      document.getElementById('hud').style.display = 'block'; document.getElementById('self-view-btn').style.display = 'block'; initSelfViewBtn();
       document.getElementById('controls').style.display = 'block';
       document.getElementById('filter-controls').style.display = 'block';
       document.getElementById('backend-label').textContent = 'MediaPipe';
@@ -1150,7 +1159,7 @@ async function startCamera() {
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 360 } }
+      video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 60 }, latencyMode: 'realtime' }
     });
     video.srcObject = stream;
     await video.play();
@@ -1168,7 +1177,7 @@ async function startCamera() {
       const ok = await initWebGPUBackend();
       if (ok) {
         statusEl.textContent = 'Move your head to shift perspective. Pinch and release to fire.';
-        document.getElementById('hud').style.display = 'block';
+        document.getElementById('hud').style.display = 'block'; document.getElementById('self-view-btn').style.display = 'block'; initSelfViewBtn();
         document.getElementById('controls').style.display = 'block';
         document.getElementById('filter-controls').style.display = 'block';
         document.getElementById('backend-label').textContent = 'WebGPU';
@@ -1181,7 +1190,7 @@ async function startCamera() {
         initMediaPipeBackend(parseInt(getSetting('numHands')));
         video.requestVideoFrameCallback(sendMediaPipeFrames);
         document.getElementById('backend-label').textContent = 'MediaPipe';
-        document.getElementById('hud').style.display = 'block';
+        document.getElementById('hud').style.display = 'block'; document.getElementById('self-view-btn').style.display = 'block'; initSelfViewBtn();
         document.getElementById('controls').style.display = 'block';
         document.getElementById('filter-controls').style.display = 'block';
       }

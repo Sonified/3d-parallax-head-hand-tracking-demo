@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Shared vs Independent Frame Upload</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; margin: 20px; }
+  video { width: 240px; border: 1px solid #333; }
+  button { font-size: 16px; padding: 8px 16px; margin: 10px 4px; cursor: pointer; }
+  table { border-collapse: collapse; margin-top: 20px; }
+  th, td { border: 1px solid #444; padding: 6px 12px; text-align: right; }
+  th { background: #222; }
+  .best { color: #0f0; font-weight: bold; }
+  .worst { color: #f44; }
+  #status { margin: 10px 0; color: #aaa; }
+  #log { margin-top: 10px; font-size: 12px; color: #888; max-height: 300px; overflow-y: auto; }
+  h3 { color: #888; margin-top: 30px; }
+  .scenario { margin: 5px 0; padding: 8px; background: #1a1a1a; border: 1px solid #333; font-size: 13px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<h2>Shared vs Independent Frame Upload</h2>
+<p>Simulates the real pipeline: multiple workers each needing the same camera frame.<br>
+Tests whether uploading once (SharedArrayBuffer) beats uploading N times independently.</p>
+<video id="video" autoplay playsinline muted></video>
+<br>
+<button id="start-btn">Start Camera</button>
+<label>Rounds: <select id="rounds-select">
+  <option value="1">1</option>
+  <option value="2" selected>2</option>
+  <option value="3">3</option>
+</select></label>
+<button id="run-btn" disabled>Run Shootout</button>
+<button id="copy-btn" style="display:none">Copy Results</button>
+<div id="status"></div>
+
+<div class="scenario">
+<b>Scenario:</b> Simulates tracking 2 hands + 1 face per frame.<br>
+<b>Independent:</b> 3 workers each get a VideoFrame, each uploads to their own GPU, each does letterbox.<br>
+<b>Shared:</b> 1 frame server uploads + letterboxes once, writes to SharedArrayBuffer, 3 consumers read via Atomics.
+</div>
+
+<h3>Total Time: All Workers Done (ms)</h3>
+<table id="results" style="display:none">
+  <thead>
+    <tr>
+      <th>Strategy</th>
+      <th>Avg (ms)</th>
+      <th>Median (ms)</th>
+      <th>P95 (ms)</th>
+      <th>Min (ms)</th>
+      <th>Max (ms)</th>
+    </tr>
+  </thead>
+  <tbody id="results-body"></tbody>
+</table>
+
+<h3>Main Thread Blocked (ms)</h3>
+<table id="block-results" style="display:none">
+  <thead><tr><th>Strategy</th><th>Avg</th><th>Median</th><th>P95</th></tr></thead>
+  <tbody id="block-body"></tbody>
+</table>
+
+<div id="log"></div>
+
+<script>
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('start-btn');
+const runBtn = document.getElementById('run-btn');
+const copyBtn = document.getElementById('copy-btn');
+const roundsSelect = document.getElementById('rounds-select');
+const logEl = document.getElementById('log');
+
+const PALM_SIZE = 192;
+const LANDMARK_SIZE = 224;
+const FACE_SIZE = 128;
+const BURST = 120;
+const FAKE_INFERENCE_MS = 5; // more realistic than 3
+
+function log(msg) {
+  const line = document.createElement('div');
+  line.textContent = msg;
+  logEl.prepend(line);
+}
+
+function stats(times) {
+  if (times.length === 0) return { avg: '0', median: '0', p95: '0', min: '0', max: '0', avgNum: 0 };
+  const sorted = [...times].sort((a, b) => a - b);
+  const avg = times.reduce((a, b) => a + b, 0) / times.length;
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const p95 = sorted[Math.floor(sorted.length * 0.95)];
+  return { avg: avg.toFixed(2), median: median.toFixed(2), p95: p95.toFixed(2),
+    min: sorted[0].toFixed(2), max: sorted[sorted.length - 1].toFixed(2), avgNum: avg };
+}
+
+function makeWorker(code) {
+  const blob = new Blob([code], { type: 'application/javascript' });
+  return new Worker(URL.createObjectURL(blob));
+}
+
+// ---- Independent worker: receives VideoFrame, does GPU letterbox + fake inference ----
+function makeIndependentWorkerCode(size) {
+  return `
+const S = ${size};
+let gpuDevice, pipeline, outBuf, readBuf, uniformBuf, sampler;
+const shader = \`
+struct Uniforms { scale: f32, offset_x: f32, offset_y: f32, src_w: f32, src_h: f32 }
+@group(0) @binding(0) var srcTexture: texture_2d<f32>;
+@group(0) @binding(1) var srcSampler: sampler;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> u: Uniforms;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let x = gid.x; let y = gid.y;
+  if (x >= \${S}u || y >= \${S}u) { return; }
+  let fx = f32(x) + 0.5; let fy = f32(y) + 0.5;
+  let sx = (fx - u.offset_x) / u.scale;
+  let sy = (fy - u.offset_y) / u.scale;
+  var r = 0.0; var g = 0.0; var b = 0.0;
+  if (sx >= 0.0 && sx < u.src_w && sy >= 0.0 && sy < u.src_h) {
+    let uv = vec2f(sx / u.src_w, sy / u.src_h);
+    let pixel = textureSampleLevel(srcTexture, srcSampler, uv, 0.0);
+    r = pixel.r; g = pixel.g; b = pixel.b;
+  }
+  let idx = (y * \${S}u + x) * 3u;
+  output[idx] = r; output[idx + 1u] = g; output[idx + 2u] = b;
+}\`;
+async function initGPU() {
+  const adapter = await navigator.gpu.requestAdapter();
+  gpuDevice = await adapter.requestDevice();
+  pipeline = gpuDevice.createComputePipeline({
+    layout: 'auto',
+    compute: { module: gpuDevice.createShaderModule({ code: shader }), entryPoint: 'main' },
+  });
+  const bytes = S * S * 3 * 4;
+  outBuf = gpuDevice.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  readBuf = gpuDevice.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  uniformBuf = gpuDevice.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  sampler = gpuDevice.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+}
+let ready = false;
+self.onmessage = async (e) => {
+  if (e.data.type === 'init') {
+    await initGPU();
+    ready = true;
+    self.postMessage({ type: 'ready' });
+    return;
+  }
+  if (e.data.type === 'process' && ready) {
+    const { frame, t0 } = e.data;
+    const srcW = frame.displayWidth, srcH = frame.displayHeight;
+    const scale = S / Math.max(srcW, srcH);
+    const dstW = Math.round(srcW * scale), dstH = Math.round(srcH * scale);
+    const offX = (S - dstW) / 2, offY = (S - dstH) / 2;
+    const tex = gpuDevice.createTexture({
+      size: [srcW, srcH], format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    gpuDevice.queue.copyExternalImageToTexture({ source: frame }, { texture: tex }, [srcW, srcH]);
+    frame.close();
+    gpuDevice.queue.writeBuffer(uniformBuf, 0, new Float32Array([scale, offX, offY, srcW, srcH, 0, 0, 0]));
+    const bg = gpuDevice.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: tex.createView() },
+        { binding: 1, resource: sampler },
+        { binding: 2, resource: { buffer: outBuf } },
+        { binding: 3, resource: { buffer: uniformBuf } },
+      ],
+    });
+    const enc = gpuDevice.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline); pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(S / 16), Math.ceil(S / 16));
+    pass.end();
+    enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, S * S * 3 * 4);
+    gpuDevice.queue.submit([enc.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    readBuf.getMappedRange();
+    readBuf.unmap();
+    tex.destroy();
+    // Simulate inference
+    const inferEnd = performance.now() + ${FAKE_INFERENCE_MS};
+    while (performance.now() < inferEnd) {}
+    self.postMessage({ type: 'result', t0 });
+  }
+};`;
+}
+
+// ---- Frame server: uploads once, writes to SharedArrayBuffer ----
+const frameServerCode = `
+const S = ${PALM_SIZE}; // letterbox to largest needed size
+let gpuDevice, pipeline, outBuf, readBuf, uniformBuf, sampler;
+let sharedPixels, sharedSignal;
+const shader = \`
+struct Uniforms { scale: f32, offset_x: f32, offset_y: f32, src_w: f32, src_h: f32 }
+@group(0) @binding(0) var srcTexture: texture_2d<f32>;
+@group(0) @binding(1) var srcSampler: sampler;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> u: Uniforms;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let x = gid.x; let y = gid.y;
+  if (x >= \${S}u || y >= \${S}u) { return; }
+  let fx = f32(x) + 0.5; let fy = f32(y) + 0.5;
+  let sx = (fx - u.offset_x) / u.scale;
+  let sy = (fy - u.offset_y) / u.scale;
+  var r = 0.0; var g = 0.0; var b = 0.0;
+  if (sx >= 0.0 && sx < u.src_w && sy >= 0.0 && sy < u.src_h) {
+    let uv = vec2f(sx / u.src_w, sy / u.src_h);
+    let pixel = textureSampleLevel(srcTexture, srcSampler, uv, 0.0);
+    r = pixel.r; g = pixel.g; b = pixel.b;
+  }
+  let idx = (y * \${S}u + x) * 3u;
+  output[idx] = r; output[idx + 1u] = g; output[idx + 2u] = b;
+}\`;
+async function initGPU() {
+  const adapter = await navigator.gpu.requestAdapter();
+  gpuDevice = await adapter.requestDevice();
+  pipeline = gpuDevice.createComputePipeline({
+    layout: 'auto',
+    compute: { module: gpuDevice.createShaderModule({ code: shader }), entryPoint: 'main' },
+  });
+  const bytes = S * S * 3 * 4;
+  outBuf = gpuDevice.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  readBuf = gpuDevice.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  uniformBuf = gpuDevice.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  sampler = gpuDevice.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+}
+let ready = false;
+let frameCounter = 0;
+self.onmessage = async (e) => {
+  if (e.data.type === 'init') {
+    sharedSignal = new Int32Array(e.data.signalBuf);
+    sharedPixels = new Float32Array(e.data.pixelBuf);
+    await initGPU();
+    ready = true;
+    self.postMessage({ type: 'ready' });
+    return;
+  }
+  if (e.data.type === 'process' && ready) {
+    const { frame, t0 } = e.data;
+    const srcW = frame.displayWidth, srcH = frame.displayHeight;
+    const scale = S / Math.max(srcW, srcH);
+    const dstW = Math.round(srcW * scale), dstH = Math.round(srcH * scale);
+    const offX = (S - dstW) / 2, offY = (S - dstH) / 2;
+    const tex = gpuDevice.createTexture({
+      size: [srcW, srcH], format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    gpuDevice.queue.copyExternalImageToTexture({ source: frame }, { texture: tex }, [srcW, srcH]);
+    frame.close();
+    gpuDevice.queue.writeBuffer(uniformBuf, 0, new Float32Array([scale, offX, offY, srcW, srcH, 0, 0, 0]));
+    const bg = gpuDevice.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: tex.createView() },
+        { binding: 1, resource: sampler },
+        { binding: 2, resource: { buffer: outBuf } },
+        { binding: 3, resource: { buffer: uniformBuf } },
+      ],
+    });
+    const enc = gpuDevice.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline); pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(S / 16), Math.ceil(S / 16));
+    pass.end();
+    enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, S * S * 3 * 4);
+    gpuDevice.queue.submit([enc.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    const gpuData = new Float32Array(readBuf.getMappedRange());
+    sharedPixels.set(gpuData);
+    readBuf.unmap();
+    tex.destroy();
+    frameCounter++;
+    Atomics.store(sharedSignal, 0, frameCounter);
+    Atomics.notify(sharedSignal, 0, 10);
+    self.postMessage({ type: 'served', t0 });
+  }
+};`;
+
+// ---- Consumer: reads SharedArrayBuffer, simulates inference ----
+const consumerCode = `
+let sharedPixels, sharedSignal;
+self.onmessage = (e) => {
+  if (e.data.type === 'init') {
+    sharedSignal = new Int32Array(e.data.signalBuf);
+    sharedPixels = new Float32Array(e.data.pixelBuf);
+    self.postMessage({ type: 'ready' });
+    return;
+  }
+  if (e.data.type === 'consume') {
+    const { t0, frameNum } = e.data;
+    while (Atomics.load(sharedSignal, 0) < frameNum) {
+      Atomics.wait(sharedSignal, 0, Atomics.load(sharedSignal, 0), 100);
+    }
+    // Touch data to prove access
+    const s = sharedPixels[0] + sharedPixels[sharedPixels.length - 1];
+    // Simulate inference
+    const inferEnd = performance.now() + ${FAKE_INFERENCE_MS};
+    while (performance.now() < inferEnd) {}
+    self.postMessage({ type: 'result', t0 });
+  }
+};`;
+
+// ============================================================
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  statusEl.textContent = 'Starting camera...';
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 60 }, latencyMode: 'realtime' }
+  });
+  video.srcObject = stream;
+  await video.play();
+  const track = stream.getVideoTracks()[0];
+  log('Camera: ' + video.videoWidth + 'x' + video.videoHeight + ' @ ' + (track.getSettings().frameRate || '?') + 'fps');
+  statusEl.textContent = 'Ready.';
+  runBtn.disabled = false;
+});
+
+runBtn.addEventListener('click', async () => {
+  runBtn.disabled = true;
+  copyBtn.style.display = 'none';
+  document.getElementById('results-body').innerHTML = '';
+  document.getElementById('block-body').innerHTML = '';
+  document.getElementById('results').style.display = 'table';
+  document.getElementById('block-results').style.display = 'table';
+
+  const ROUNDS = parseInt(roundsSelect.value);
+  const NUM_CONSUMERS = 3; // palm + landmark0 + landmark1 (or face)
+
+  statusEl.textContent = 'Initializing workers...';
+
+  // ---- Strategy A: Independent workers (3 workers, each gets a VideoFrame) ----
+  const indepWorkers = [];
+  const sizes = [PALM_SIZE, LANDMARK_SIZE, LANDMARK_SIZE]; // palm + 2 landmarks
+  for (let i = 0; i < NUM_CONSUMERS; i++) {
+    const w = makeWorker(makeIndependentWorkerCode(sizes[i]));
+    await new Promise(r => { w.onmessage = (e) => { if (e.data.type === 'ready') r(); }; w.postMessage({ type: 'init' }); });
+    indepWorkers.push(w);
+  }
+
+  // ---- Strategy B: Shared frame server + 3 consumers ----
+  const pixelBytes = PALM_SIZE * PALM_SIZE * 3 * 4;
+  const signalBuf = new SharedArrayBuffer(4);
+  const pixelBuf = new SharedArrayBuffer(pixelBytes);
+
+  const server = makeWorker(frameServerCode);
+  await new Promise(r => { server.onmessage = (e) => { if (e.data.type === 'ready') r(); }; server.postMessage({ type: 'init', signalBuf, pixelBuf }); });
+
+  const consumers = [];
+  for (let i = 0; i < NUM_CONSUMERS; i++) {
+    const c = makeWorker(consumerCode);
+    await new Promise(r => { c.onmessage = (e) => { if (e.data.type === 'ready') r(); }; c.postMessage({ type: 'init', signalBuf, pixelBuf }); });
+    consumers.push(c);
+  }
+
+  log('All workers initialized');
+
+  // ---- Warmup ----
+  statusEl.textContent = 'Warming up...';
+  let frameNum = 0;
+  for (let w = 0; w < 20; w++) {
+    await new Promise(r => video.requestVideoFrameCallback(r));
+    // Warmup independent
+    const frames = [];
+    for (let i = 0; i < NUM_CONSUMERS; i++) frames.push(new VideoFrame(video));
+    await Promise.all(indepWorkers.map((worker, i) => new Promise(r => {
+      worker.onmessage = () => r();
+      worker.postMessage({ type: 'process', frame: frames[i], t0: 0 }, [frames[i]]);
+    })));
+    // Warmup shared
+    frameNum++;
+    const sf = new VideoFrame(video);
+    await new Promise(r => {
+      server.onmessage = (e) => {
+        if (e.data.type === 'served') {
+          Promise.all(consumers.map(c => new Promise(cr => {
+            c.onmessage = () => cr();
+            c.postMessage({ type: 'consume', t0: 0, frameNum });
+          }))).then(r);
+        }
+      };
+      server.postMessage({ type: 'process', frame: sf, t0: 0 }, [sf]);
+    });
+  }
+  log('Warmup done');
+
+  // ---- Measurement ----
+  const runners = [
+    { name: 'A: Independent (3x VideoFrame + 3x GPU upload)', roundTrips: [], blockTimes: [] },
+    { name: 'B: Shared (1x upload + SharedArrayBuffer + 3 consumers)', roundTrips: [], blockTimes: [] },
+  ];
+
+  for (let round = 0; round < ROUNDS; round++) {
+    const order = Math.random() > 0.5 ? [0, 1] : [1, 0];
+    log('Round ' + (round + 1) + ' order: ' + order.map(i => ['A','B'][i]).join(', '));
+
+    for (const si of order) {
+      statusEl.textContent = 'Round ' + (round+1) + '/' + ROUNDS + ': ' + runners[si].name;
+
+      for (let i = 0; i < BURST; i++) {
+        await new Promise(r => video.requestVideoFrameCallback(r));
+
+        if (si === 0) {
+          // Strategy A: 3 independent workers, each gets a VideoFrame
+          const bt0 = performance.now();
+          const frames = [];
+          for (let j = 0; j < NUM_CONSUMERS; j++) frames.push(new VideoFrame(video));
+          const blockTime = performance.now() - bt0;
+          runners[0].blockTimes.push(blockTime);
+
+          const t0 = performance.now();
+          await Promise.all(indepWorkers.map((worker, j) => new Promise(r => {
+            worker.onmessage = (e) => { if (e.data.type === 'result') r(); };
+            worker.postMessage({ type: 'process', frame: frames[j], t0 }, [frames[j]]);
+          })));
+          runners[0].roundTrips.push(performance.now() - t0);
+
+        } else {
+          // Strategy B: frame server + 3 consumers
+          const bt0 = performance.now();
+          const f = new VideoFrame(video);
+          const blockTime = performance.now() - bt0;
+          runners[1].blockTimes.push(blockTime);
+
+          frameNum++;
+          const targetFrame = frameNum;
+          const t0 = performance.now();
+
+          await new Promise(resolve => {
+            server.onmessage = (e) => {
+              if (e.data.type === 'served') {
+                Promise.all(consumers.map(c => new Promise(cr => {
+                  c.onmessage = (ce) => { if (ce.data.type === 'result') cr(); };
+                  c.postMessage({ type: 'consume', t0, frameNum: targetFrame });
+                }))).then(resolve);
+              }
+            };
+            server.postMessage({ type: 'process', frame: f, t0 }, [f]);
+          });
+          runners[1].roundTrips.push(performance.now() - t0);
+        }
+      }
+      log('  ' + runners[si].name + ' done');
+    }
+  }
+
+  // Cleanup
+  indepWorkers.forEach(w => w.terminate());
+  consumers.forEach(c => c.terminate());
+  server.terminate();
+
+  // ---- Render ----
+  const resultsBody = document.getElementById('results-body');
+  const blockBody = document.getElementById('block-body');
+  const allRT = runners.map(r => ({ name: r.name, ...stats(r.roundTrips) }));
+  const allBT = runners.map(r => ({ name: r.name, ...stats(r.blockTimes) }));
+
+  for (const r of runners) {
+    log(r.name + ' (' + r.roundTrips.length + '): RT=' + stats(r.roundTrips).avg + 'ms, block=' + stats(r.blockTimes).avg + 'ms');
+  }
+
+  const bestRT = Math.min(...allRT.map(r => r.avgNum));
+  const worstRT = Math.max(...allRT.map(r => r.avgNum));
+  for (const r of allRT) {
+    const row = document.createElement('tr');
+    const cls = r.avgNum === bestRT ? 'best' : r.avgNum === worstRT ? 'worst' : '';
+    row.innerHTML = '<td style="text-align:left">' + r.name + '</td>' +
+      '<td class="' + cls + '">' + r.avg + '</td><td>' + r.median + '</td><td>' + r.p95 + '</td>' +
+      '<td>' + r.min + '</td><td>' + r.max + '</td>';
+    resultsBody.appendChild(row);
+  }
+  const bestBT = Math.min(...allBT.map(r => r.avgNum));
+  const worstBT = Math.max(...allBT.map(r => r.avgNum));
+  for (const r of allBT) {
+    const row = document.createElement('tr');
+    const cls = r.avgNum === bestBT ? 'best' : r.avgNum === worstBT ? 'worst' : '';
+    row.innerHTML = '<td style="text-align:left">' + r.name + '</td>' +
+      '<td class="' + cls + '">' + r.avg + '</td><td>' + r.median + '</td><td>' + r.p95 + '</td>';
+    blockBody.appendChild(row);
+  }
+
+  statusEl.textContent = 'Done! ' + ROUNDS + ' rounds x ' + BURST + ' frames. ' + (ROUNDS * BURST) + ' samples each.';
+  runBtn.disabled = false;
+  copyBtn.style.display = 'inline-block';
+  window._lastResults = { allRT, allBT, rounds: ROUNDS, burst: BURST };
+});
+
+copyBtn.addEventListener('click', () => {
+  const r = window._lastResults;
+  let text = 'Shared vs Independent (' + r.rounds + ' rounds x ' + r.burst + ' frames)\n\n';
+  text += 'ROUND-TRIP (ms)\nStrategy\tAvg\tMedian\tP95\tMin\tMax\n';
+  for (const rt of r.allRT) text += rt.name + '\t' + rt.avg + '\t' + rt.median + '\t' + rt.p95 + '\t' + rt.min + '\t' + rt.max + '\n';
+  text += '\nBLOCK TIME (ms)\nStrategy\tAvg\tMedian\tP95\n';
+  for (const bt of r.allBT) text += bt.name + '\t' + bt.avg + '\t' + bt.median + '\t' + bt.p95 + '\n';
+  navigator.clipboard.writeText(text).then(() => {
+    copyBtn.textContent = 'Copied!';
+    setTimeout(() => { copyBtn.textContent = 'Copy Results'; }, 1500);
+  });
+});
+</script>
+</body>
+</html>

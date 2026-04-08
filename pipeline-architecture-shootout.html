@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pipeline Architecture Shootout v2</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; margin: 20px; }
+  video { width: 240px; border: 1px solid #333; }
+  button { font-size: 16px; padding: 8px 16px; margin: 10px 4px; cursor: pointer; }
+  table { border-collapse: collapse; margin-top: 20px; }
+  th, td { border: 1px solid #444; padding: 6px 12px; text-align: right; }
+  th { background: #222; }
+  .best { color: #0f0; font-weight: bold; }
+  .worst { color: #f44; }
+  #status { margin: 10px 0; color: #aaa; }
+  #log { margin-top: 10px; font-size: 12px; color: #888; max-height: 300px; overflow-y: auto; }
+  h3 { color: #888; margin-top: 30px; }
+  .scenario { margin: 5px 0; padding: 10px; background: #1a1a1a; border: 1px solid #333; font-size: 13px; line-height: 1.8; }
+</style>
+</head>
+<body>
+<h2>Pipeline Architecture Shootout v2</h2>
+<p>Render loop decoupled from camera. Render runs at display refresh (120Hz ProMotion).<br>
+Inference runs async. Measures effective render FPS, inference throughput, and result freshness.</p>
+<video id="video" autoplay playsinline muted></video>
+<br>
+<button id="start-btn">Start Camera</button>
+<label>Duration: <select id="duration-select">
+  <option value="3">3 sec</option>
+  <option value="5" selected>5 sec</option>
+  <option value="10">10 sec</option>
+</select></label>
+<button id="run-btn" disabled>Run Shootout</button>
+<button id="copy-btn" style="display:none">Copy Results</button>
+<div id="status"></div>
+
+<div class="scenario">
+<b>Key change:</b> Render loop uses requestAnimationFrame (120fps on ProMotion), NOT tied to camera frames (30fps).<br><br>
+<b>1. Serial:</b> Render waits for inference. Locked to inference speed. (Baseline worst case)<br>
+<b>2. Fire-and-forget:</b> Kick off inference on new camera frames. Render always runs, uses latest result. Never waits.<br>
+<b>3. Double-buffer fire-and-forget:</b> Two workers. Kick off inference on every camera frame. Overlap inference. Never wait.<br>
+<b>4. Kalman skip:</b> Infer every 2nd camera frame. Predict on skips. Render at full display rate always.<br>
+<b>5. Fire-and-forget + Kalman interp:</b> Infer async, render at 120fps with Kalman interpolation between measurements.
+</div>
+
+<h3>Results</h3>
+<table id="results" style="display:none">
+  <thead>
+    <tr>
+      <th>Strategy</th>
+      <th>Render FPS</th>
+      <th>Inferences</th>
+      <th>Inference FPS</th>
+      <th>Renders w/ fresh data</th>
+      <th>Renders w/ prediction</th>
+      <th>Avg result age (ms)</th>
+      <th>Max result age (ms)</th>
+    </tr>
+  </thead>
+  <tbody id="results-body"></tbody>
+</table>
+
+<div id="log"></div>
+
+<script>
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('start-btn');
+const runBtn = document.getElementById('run-btn');
+const copyBtn = document.getElementById('copy-btn');
+const durationSelect = document.getElementById('duration-select');
+const logEl = document.getElementById('log');
+
+const INFERENCE_MS = 6;
+
+function log(msg) {
+  const line = document.createElement('div');
+  line.textContent = msg;
+  logEl.prepend(line);
+}
+
+function makeWorker(code) {
+  const blob = new Blob([code], { type: 'application/javascript' });
+  return new Worker(URL.createObjectURL(blob));
+}
+
+const workerCode = `
+const S = 192;
+let gpuDevice, pipeline, outBuf, readBuf, uniformBuf, sampler;
+const shader = \`
+struct Uniforms { scale: f32, offset_x: f32, offset_y: f32, src_w: f32, src_h: f32 }
+@group(0) @binding(0) var srcTexture: texture_2d<f32>;
+@group(0) @binding(1) var srcSampler: sampler;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> u: Uniforms;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let x = gid.x; let y = gid.y;
+  if (x >= \${S}u || y >= \${S}u) { return; }
+  let fx = f32(x) + 0.5; let fy = f32(y) + 0.5;
+  let sx = (fx - u.offset_x) / u.scale;
+  let sy = (fy - u.offset_y) / u.scale;
+  var r = 0.0; var g = 0.0; var b = 0.0;
+  if (sx >= 0.0 && sx < u.src_w && sy >= 0.0 && sy < u.src_h) {
+    let uv = vec2f(sx / u.src_w, sy / u.src_h);
+    let pixel = textureSampleLevel(srcTexture, srcSampler, uv, 0.0);
+    r = pixel.r; g = pixel.g; b = pixel.b;
+  }
+  let idx = (y * \${S}u + x) * 3u;
+  output[idx] = r; output[idx + 1u] = g; output[idx + 2u] = b;
+}\`;
+async function initGPU() {
+  const adapter = await navigator.gpu.requestAdapter();
+  gpuDevice = await adapter.requestDevice();
+  pipeline = gpuDevice.createComputePipeline({
+    layout: 'auto',
+    compute: { module: gpuDevice.createShaderModule({ code: shader }), entryPoint: 'main' },
+  });
+  const bytes = S * S * 3 * 4;
+  outBuf = gpuDevice.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  readBuf = gpuDevice.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  uniformBuf = gpuDevice.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  sampler = gpuDevice.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+}
+let ready = false;
+self.onmessage = async (e) => {
+  if (e.data.type === 'init') {
+    await initGPU();
+    ready = true;
+    self.postMessage({ type: 'ready' });
+    return;
+  }
+  if (e.data.type === 'process' && ready) {
+    const { frame, id, captureTime } = e.data;
+    const srcW = frame.displayWidth, srcH = frame.displayHeight;
+    const scale = S / Math.max(srcW, srcH);
+    const dstW = Math.round(srcW * scale), dstH = Math.round(srcH * scale);
+    const offX = (S - dstW) / 2, offY = (S - dstH) / 2;
+    const tex = gpuDevice.createTexture({
+      size: [srcW, srcH], format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    gpuDevice.queue.copyExternalImageToTexture({ source: frame }, { texture: tex }, [srcW, srcH]);
+    frame.close();
+    gpuDevice.queue.writeBuffer(uniformBuf, 0, new Float32Array([scale, offX, offY, srcW, srcH, 0, 0, 0]));
+    const bg = gpuDevice.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: tex.createView() },
+        { binding: 1, resource: sampler },
+        { binding: 2, resource: { buffer: outBuf } },
+        { binding: 3, resource: { buffer: uniformBuf } },
+      ],
+    });
+    const enc = gpuDevice.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline); pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(S / 16), Math.ceil(S / 16));
+    pass.end();
+    enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, S * S * 3 * 4);
+    gpuDevice.queue.submit([enc.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    readBuf.getMappedRange();
+    readBuf.unmap();
+    tex.destroy();
+    const inferEnd = performance.now() + ${INFERENCE_MS};
+    while (performance.now() < inferEnd) {}
+    self.postMessage({ type: 'result', id, captureTime, doneAt: performance.now() });
+  }
+};`;
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  statusEl.textContent = 'Starting camera...';
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 60 }, latencyMode: 'realtime' }
+  });
+  video.srcObject = stream;
+  await video.play();
+  const track = stream.getVideoTracks()[0];
+  log('Camera: ' + video.videoWidth + 'x' + video.videoHeight + ' @ ' + (track.getSettings().frameRate || '?') + 'fps');
+  log('Display: ' + screen.width + 'x' + screen.height + ' (requestAnimationFrame will target display refresh)');
+  statusEl.textContent = 'Ready.';
+  runBtn.disabled = false;
+});
+
+// ============================================================
+// Run a strategy: returns { renderFps, inferences, freshRenders, predictionRenders, resultAges }
+// Each strategy gets a `setup` that returns { onRenderFrame, onCameraFrame, cleanup }
+// The harness runs rAF for render and requestVideoFrameCallback for camera, independently.
+// ============================================================
+
+async function runStrategy(name, durationMs, setupFn) {
+  const state = await setupFn();
+
+  const renderTimes = [];
+  const resultAges = [];
+  let freshRenders = 0;
+  let predictionRenders = 0;
+  let inferences = 0;
+  let lastResultTime = 0;
+  let lastResultId = -1;
+  let running = true;
+  const start = performance.now();
+
+  // Camera frame loop (30fps, independent)
+  let cameraFrameNum = 0;
+  function onCameraFrame() {
+    if (!running) return;
+    cameraFrameNum++;
+    state.onCameraFrame(cameraFrameNum, performance.now());
+    video.requestVideoFrameCallback(onCameraFrame);
+  }
+  video.requestVideoFrameCallback(onCameraFrame);
+
+  // Render loop (120fps via rAF, independent)
+  await new Promise(resolve => {
+    let lastRender = start;
+    function renderLoop() {
+      if (!running) { resolve(); return; }
+      const now = performance.now();
+      if (now - start >= durationMs) {
+        running = false;
+        resolve();
+        return;
+      }
+
+      renderTimes.push(now - lastRender);
+      lastRender = now;
+
+      // Ask strategy what to render with
+      const renderInfo = state.onRenderFrame(now);
+      if (renderInfo.fresh) {
+        freshRenders++;
+      } else {
+        predictionRenders++;
+      }
+      if (renderInfo.resultTime > 0) {
+        resultAges.push(now - renderInfo.resultTime);
+      }
+
+      requestAnimationFrame(renderLoop);
+    }
+    requestAnimationFrame(renderLoop);
+  });
+
+  const cleanup = state.getStats();
+  inferences = cleanup.inferences;
+
+  const elapsed = performance.now() - start;
+  const renderFps = renderTimes.length / elapsed * 1000;
+  const inferenceFps = inferences / elapsed * 1000;
+  const avgAge = resultAges.length ? resultAges.reduce((a,b)=>a+b,0) / resultAges.length : 0;
+  const maxAge = resultAges.length ? Math.max(...resultAges) : 0;
+
+  if (state.cleanup) state.cleanup();
+
+  return {
+    name,
+    renderFps: renderFps.toFixed(1),
+    inferences,
+    inferenceFps: inferenceFps.toFixed(1),
+    freshRenders,
+    predictionRenders,
+    avgAge: avgAge.toFixed(2),
+    maxAge: maxAge.toFixed(2),
+  };
+}
+
+runBtn.addEventListener('click', async () => {
+  runBtn.disabled = true;
+  copyBtn.style.display = 'none';
+  document.getElementById('results-body').innerHTML = '';
+  document.getElementById('results').style.display = 'table';
+
+  const DURATION_MS = parseInt(durationSelect.value) * 1000;
+
+  // Init workers
+  statusEl.textContent = 'Initializing workers...';
+  const workers = [];
+  for (let i = 0; i < 3; i++) {
+    const w = makeWorker(workerCode);
+    await new Promise(r => { w.onmessage = (e) => { if (e.data.type === 'ready') r(); }; w.postMessage({ type: 'init' }); });
+    workers.push(w);
+  }
+
+  // Warmup
+  statusEl.textContent = 'Warming up...';
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => video.requestVideoFrameCallback(r));
+    const f = new VideoFrame(video);
+    await new Promise(resolve => {
+      workers[0].onmessage = () => resolve();
+      workers[0].postMessage({ type: 'process', frame: f, id: 0, captureTime: 0 }, [f]);
+    });
+  }
+
+  const allResults = [];
+
+  // ============================================================
+  // 1. SERIAL: Render loop waits for inference result each camera frame
+  // ============================================================
+  {
+    statusEl.textContent = 'Running: 1. Serial...';
+    log('Starting: Serial');
+
+    const result = await runStrategy('1: Serial (render waits for inference)', DURATION_MS, async () => {
+      let inferCount = 0;
+      let latestResultTime = 0;
+      let lastRenderedId = -1;
+      let workerBusy = false;
+      let pendingResult = null;
+
+      workers[0].onmessage = (e) => {
+        if (e.data.type === 'result') {
+          latestResultTime = performance.now();
+          pendingResult = e.data;
+          workerBusy = false;
+        }
+      };
+
+      return {
+        onCameraFrame: (frameNum, captureTime) => {
+          if (!workerBusy) {
+            const f = new VideoFrame(video);
+            workerBusy = true;
+            workers[0].postMessage({ type: 'process', frame: f, id: frameNum, captureTime }, [f]);
+            inferCount++;
+          }
+        },
+        onRenderFrame: (now) => {
+          // Serial: only "render" when we have a new result
+          if (pendingResult && pendingResult.id !== lastRenderedId) {
+            lastRenderedId = pendingResult.id;
+            return { fresh: true, resultTime: latestResultTime };
+          }
+          // Stale -- waiting for inference
+          return { fresh: false, resultTime: latestResultTime };
+        },
+        getStats: () => ({ inferences: inferCount }),
+        cleanup: () => {},
+      };
+    });
+    allResults.push(result);
+    log(result.name + ': ' + result.renderFps + ' render fps, ' + result.inferenceFps + ' inference fps');
+  }
+
+  // ============================================================
+  // 2. FIRE-AND-FORGET: Kick off inference, never wait, render always
+  // ============================================================
+  {
+    statusEl.textContent = 'Running: 2. Fire-and-forget...';
+    log('Starting: Fire-and-forget');
+
+    const result = await runStrategy('2: Fire-and-forget (1 worker)', DURATION_MS, async () => {
+      let inferCount = 0;
+      let latestResultTime = 0;
+      let workerBusy = false;
+      let lastRenderedResultTime = 0;
+
+      workers[0].onmessage = (e) => {
+        if (e.data.type === 'result') {
+          latestResultTime = performance.now();
+          workerBusy = false;
+        }
+      };
+
+      return {
+        onCameraFrame: (frameNum, captureTime) => {
+          if (!workerBusy) {
+            const f = new VideoFrame(video);
+            workerBusy = true;
+            workers[0].postMessage({ type: 'process', frame: f, id: frameNum, captureTime }, [f]);
+            inferCount++;
+          }
+        },
+        onRenderFrame: (now) => {
+          const fresh = latestResultTime > lastRenderedResultTime;
+          if (fresh) lastRenderedResultTime = latestResultTime;
+          return { fresh, resultTime: latestResultTime };
+        },
+        getStats: () => ({ inferences: inferCount }),
+        cleanup: () => {},
+      };
+    });
+    allResults.push(result);
+    log(result.name + ': ' + result.renderFps + ' render fps, ' + result.inferenceFps + ' inference fps');
+  }
+
+  // ============================================================
+  // 3. DOUBLE-BUFFER FIRE-AND-FORGET: 2 workers, both fire-and-forget
+  // ============================================================
+  {
+    statusEl.textContent = 'Running: 3. Double-buffer...';
+    log('Starting: Double-buffer');
+
+    const result = await runStrategy('3: Double-buffer (2 workers, never wait)', DURATION_MS, async () => {
+      let inferCount = 0;
+      let latestResultTime = 0;
+      let busy = [false, false];
+      let lastRenderedResultTime = 0;
+
+      workers[0].onmessage = (e) => {
+        if (e.data.type === 'result') { latestResultTime = performance.now(); busy[0] = false; }
+      };
+      workers[1].onmessage = (e) => {
+        if (e.data.type === 'result') { latestResultTime = performance.now(); busy[1] = false; }
+      };
+
+      return {
+        onCameraFrame: (frameNum, captureTime) => {
+          // Find free worker
+          let wi = -1;
+          if (!busy[0]) wi = 0;
+          else if (!busy[1]) wi = 1;
+          if (wi >= 0) {
+            const f = new VideoFrame(video);
+            busy[wi] = true;
+            workers[wi].postMessage({ type: 'process', frame: f, id: frameNum, captureTime }, [f]);
+            inferCount++;
+          }
+        },
+        onRenderFrame: (now) => {
+          const fresh = latestResultTime > lastRenderedResultTime;
+          if (fresh) lastRenderedResultTime = latestResultTime;
+          return { fresh, resultTime: latestResultTime };
+        },
+        getStats: () => ({ inferences: inferCount }),
+        cleanup: () => {},
+      };
+    });
+    allResults.push(result);
+    log(result.name + ': ' + result.renderFps + ' render fps, ' + result.inferenceFps + ' inference fps');
+  }
+
+  // ============================================================
+  // 4. KALMAN SKIP: Infer every 2nd camera frame, predict on skips
+  // ============================================================
+  {
+    statusEl.textContent = 'Running: 4. Kalman skip...';
+    log('Starting: Kalman skip');
+
+    const result = await runStrategy('4: Kalman skip (infer every 2nd camera frame)', DURATION_MS, async () => {
+      let inferCount = 0;
+      let latestResultTime = 0;
+      let workerBusy = false;
+      let cameraFrameCount = 0;
+      let lastRenderedResultTime = 0;
+
+      workers[0].onmessage = (e) => {
+        if (e.data.type === 'result') {
+          latestResultTime = performance.now();
+          workerBusy = false;
+        }
+      };
+
+      return {
+        onCameraFrame: (frameNum, captureTime) => {
+          cameraFrameCount++;
+          if (cameraFrameCount % 2 === 1 && !workerBusy) {
+            const f = new VideoFrame(video);
+            workerBusy = true;
+            workers[0].postMessage({ type: 'process', frame: f, id: frameNum, captureTime }, [f]);
+            inferCount++;
+          }
+        },
+        onRenderFrame: (now) => {
+          const fresh = latestResultTime > lastRenderedResultTime;
+          if (fresh) lastRenderedResultTime = latestResultTime;
+          return { fresh, resultTime: latestResultTime };
+        },
+        getStats: () => ({ inferences: inferCount }),
+        cleanup: () => {},
+      };
+    });
+    allResults.push(result);
+    log(result.name + ': ' + result.renderFps + ' render fps, ' + result.inferenceFps + ' inference fps');
+  }
+
+  // ============================================================
+  // 5. DOUBLE-BUFFER + KALMAN: 2 workers, infer every 2nd, predict rest
+  // ============================================================
+  {
+    statusEl.textContent = 'Running: 5. Double-buffer + Kalman...';
+    log('Starting: Double-buffer + Kalman');
+
+    const result = await runStrategy('5: Double-buffer + Kalman skip', DURATION_MS, async () => {
+      let inferCount = 0;
+      let latestResultTime = 0;
+      let busy = [false, false];
+      let cameraFrameCount = 0;
+      let lastRenderedResultTime = 0;
+
+      workers[0].onmessage = (e) => {
+        if (e.data.type === 'result') { latestResultTime = performance.now(); busy[0] = false; }
+      };
+      workers[1].onmessage = (e) => {
+        if (e.data.type === 'result') { latestResultTime = performance.now(); busy[1] = false; }
+      };
+
+      return {
+        onCameraFrame: (frameNum, captureTime) => {
+          cameraFrameCount++;
+          if (cameraFrameCount % 2 === 1) {
+            let wi = !busy[0] ? 0 : (!busy[1] ? 1 : -1);
+            if (wi >= 0) {
+              const f = new VideoFrame(video);
+              busy[wi] = true;
+              workers[wi].postMessage({ type: 'process', frame: f, id: frameNum, captureTime }, [f]);
+              inferCount++;
+            }
+          }
+        },
+        onRenderFrame: (now) => {
+          const fresh = latestResultTime > lastRenderedResultTime;
+          if (fresh) lastRenderedResultTime = latestResultTime;
+          return { fresh, resultTime: latestResultTime };
+        },
+        getStats: () => ({ inferences: inferCount }),
+        cleanup: () => {},
+      };
+    });
+    allResults.push(result);
+    log(result.name + ': ' + result.renderFps + ' render fps, ' + result.inferenceFps + ' inference fps');
+  }
+
+  // Cleanup
+  workers.forEach(w => w.terminate());
+
+  // ---- Render results ----
+  const resultsBody = document.getElementById('results-body');
+  const bestRenderFps = Math.max(...allResults.map(r => parseFloat(r.renderFps)));
+  const bestInfFps = Math.max(...allResults.map(r => parseFloat(r.inferenceFps)));
+  const bestAge = Math.min(...allResults.map(r => parseFloat(r.avgAge)));
+
+  for (const r of allResults) {
+    const row = document.createElement('tr');
+    const rfCls = parseFloat(r.renderFps) === bestRenderFps ? 'best' : '';
+    const ifCls = parseFloat(r.inferenceFps) === bestInfFps ? 'best' : '';
+    const ageCls = parseFloat(r.avgAge) === bestAge ? 'best' : '';
+    row.innerHTML =
+      '<td style="text-align:left">' + r.name + '</td>' +
+      '<td class="' + rfCls + '">' + r.renderFps + '</td>' +
+      '<td>' + r.inferences + '</td>' +
+      '<td class="' + ifCls + '">' + r.inferenceFps + '</td>' +
+      '<td>' + r.freshRenders + '</td>' +
+      '<td>' + r.predictionRenders + '</td>' +
+      '<td class="' + ageCls + '">' + r.avgAge + '</td>' +
+      '<td>' + r.maxAge + '</td>';
+    resultsBody.appendChild(row);
+  }
+
+  statusEl.textContent = 'Done!';
+  runBtn.disabled = false;
+  copyBtn.style.display = 'inline-block';
+  window._lastResults = allResults;
+});
+
+copyBtn.addEventListener('click', () => {
+  const r = window._lastResults;
+  let text = 'Pipeline Architecture Shootout v2 (inference sim: ' + INFERENCE_MS + 'ms, display-decoupled)\n\n';
+  text += 'Strategy\tRender FPS\tInferences\tInference FPS\tFresh renders\tPrediction renders\tAvg age (ms)\tMax age (ms)\n';
+  for (const row of r) {
+    text += row.name + '\t' + row.renderFps + '\t' + row.inferences + '\t' + row.inferenceFps + '\t' + row.freshRenders + '\t' + row.predictionRenders + '\t' + row.avgAge + '\t' + row.maxAge + '\n';
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    copyBtn.textContent = 'Copied!';
+    setTimeout(() => { copyBtn.textContent = 'Copy Results'; }, 1500);
+  });
+});
+</script>
+</body>
+</html>
