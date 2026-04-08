@@ -102,6 +102,7 @@
   <div class="param-row"><span class="param-name">Beta</span><input type="range" id="head-beta" min="5" max="100" step="1" value="35"><span class="param-val" id="head-beta-val">3.5</span></div>
   <div class="section-label">Parallax</div>
   <div class="param-row"><span class="param-name">Amount</span><input type="range" id="parallax-amount" min="0" max="2" step="0.05" value="0.7"><span class="param-val" id="parallax-amount-val">0.70</span></div>
+  <div class="param-row"><span class="param-name">Depth</span><input type="range" id="parallax-depth" min="5" max="80" step="1" value="20"><span class="param-val" id="parallax-depth-val">20</span></div>
   <div class="section-label">Hands</div>
   <div class="param-row"><span class="param-name">Floor</span><input type="range" id="hand-floor" min="1" max="100" step="1" value="10"><span class="param-val" id="hand-floor-val">0.10</span></div>
   <div class="param-row"><span class="param-name">Beta</span><input type="range" id="hand-beta" min="5" max="100" step="1" value="35"><span class="param-val" id="hand-beta-val">3.5</span></div>
@@ -454,7 +455,7 @@ document.getElementById('recenter-btn').addEventListener('click', () => {
 document.getElementById('copy-settings-btn').addEventListener('click', () => {
   const settings = {
     head: { floor: filterParams.head.floor, beta: filterParams.head.beta },
-    parallax: { amount: parallaxAmount },
+    parallax: { amount: parallaxAmount, depth: parallaxDepth },
     hands: { floor: filterParams.hand.floor, beta: filterParams.hand.beta },
   };
   navigator.clipboard.writeText(JSON.stringify(settings, null, 2));
@@ -487,6 +488,18 @@ parallaxAmountSlider.addEventListener('input', (e) => {
   parallaxAmount = parseFloat(e.target.value);
   parallaxAmountVal.textContent = parallaxAmount.toFixed(2);
   setSetting('parallax-amount', parallaxAmount.toString());
+});
+
+// Parallax depth: how far back the lookAt anchor sits in Z
+let parallaxDepth = parseFloat((v => v !== null ? v : '20')(localStorage.getItem('parallax-depth')));
+const parallaxDepthSlider = document.getElementById('parallax-depth');
+const parallaxDepthVal = document.getElementById('parallax-depth-val');
+parallaxDepthSlider.value = parallaxDepth;
+parallaxDepthVal.textContent = Math.round(parallaxDepth);
+parallaxDepthSlider.addEventListener('input', (e) => {
+  parallaxDepth = parseFloat(e.target.value);
+  parallaxDepthVal.textContent = Math.round(parallaxDepth);
+  setSetting('parallax-depth', parallaxDepth.toString());
 });
 
 // ============================================================
@@ -642,7 +655,7 @@ let parallaxEnabled = parallaxMode !== 'off';
 function applyHeadParallax() {
   if (!parallaxEnabled) {
     camera.position.set(0, 0, 8);
-    camera.lookAt(0, 0, -20);
+    camera.lookAt(0, 0, -parallaxDepth);
     return;
   }
   camera.position.set(
@@ -650,7 +663,7 @@ function applyHeadParallax() {
     headPos.y * PARALLAX_Y * parallaxAmount,
     8 + headPos.z * PARALLAX_Z * parallaxAmount
   );
-  camera.lookAt(0, 0, -20);
+  camera.lookAt(0, 0, -parallaxDepth);
 }
 
 // ============================================================
