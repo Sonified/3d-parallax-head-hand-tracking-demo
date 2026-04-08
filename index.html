@@ -109,7 +109,7 @@
   <div><span class="label">Head: </span><span id="head-pos" class="val">--</span></div>
   <div><span class="label">Hand: </span><span id="hand-state" class="val">--</span></div>
   <div><span class="label">Gesture: </span><span id="gesture-state" class="val">--</span></div>
-  <div><span class="label">FPS: </span><span id="fps" class="val">--</span></div>
+  <div><span class="label">FPS: </span><span id="fps" class="val">--</span> <button id="fps-cap-btn" style="background:#222; color:#888; border:1px solid #444; border-radius:3px; padding:1px 6px; font-size:0.7rem; cursor:pointer; margin-left:6px;">Cap</button></div>
   <div><span class="label">Backend: </span><span id="backend-label" class="val">--</span></div>
 </div>
 
@@ -776,9 +776,29 @@ const clock = new THREE.Clock();
 let frameCount = 0, lastFpsTime = 0, winShowing = false;
 let activeBackend = getSetting('backend');
 
-function animate() {
+// FPS cap
+let fpsCapped = getSetting('fpsCap') === 'true';
+const FPS_CAP = 120;
+const FRAME_MIN_MS = 1000 / FPS_CAP;
+let lastFrameTime = 0;
+
+const fpsCapBtn = document.getElementById('fps-cap-btn');
+function updateCapBtn() {
+  fpsCapBtn.textContent = fpsCapped ? 'Uncap' : 'Cap';
+  fpsCapBtn.style.color = fpsCapped ? '#4fc3f7' : '#888';
+}
+updateCapBtn();
+fpsCapBtn.addEventListener('click', () => {
+  fpsCapped = !fpsCapped;
+  setSetting('fpsCap', fpsCapped.toString());
+  updateCapBtn();
+});
+
+function animate(timestamp) {
   if (document.hidden) return;
   requestAnimationFrame(animate);
+  if (fpsCapped && timestamp - lastFrameTime < FRAME_MIN_MS) return;
+  lastFrameTime = timestamp;
   const dt = clock.getDelta();
   const now = performance.now();
 
