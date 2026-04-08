@@ -139,7 +139,7 @@ Under the passthrough mechanism (ghost relaxation rate = 0), each ghost channel 
 
 Multiple ghost fields injected at different spatial locations may merge without overwriting, clipping, or interfering. The blending is proportional and smooth, producing continuous gradients at the interface between different metadata values. This property eliminates the need for interface tracking, collision detection between metadata regions, or explicit blending logic. The streaming kernel performs the interpolation naturally.
 
-The ghost field may be characterized by standard fluid dynamics metrics including diffusion coefficient, center of mass trajectory, RMS spread radius, directional anisotropy, and conservation of total integrated value. These properties are deterministic and reproducible in integer arithmetic.
+The ghost field may be characterized by standard fluid dynamics metrics including diffusion coefficient, center of mass trajectory, RMS spread radius, directional anisotropy, and conservation of total integrated value. These properties are deterministic and reproducible in integer arithmetic. The nine channels organize into four symmetry groups — one shear plane, three directional beams, three diagonal crosses, and two isotropic breaths — each with a distinct geometric personality derived from its eigenvector structure. Full per-channel transport characterization is in Appendix II.
 
 Ghost mode channels support two distinct access modes that may be selected independently per channel and per use case.
 
