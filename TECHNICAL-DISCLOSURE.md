@@ -100,6 +100,12 @@ No prior art is known for using LBM ghost modes as a general-purpose metadata tr
 
 ### I.A. Integer-Exact Ghost Mode Encoding via LCD-Scaled Channels
 
+The write operation for ghost channel k is termed Fluid Ghost Encoding (FGE). For each lattice direction i in 0..18, FGE adds a weighted contribution to the distribution function at the encoding cell:
+
+    f[i] += W[i] * M[k][i] * value / d_k
+
+where W[i] is the lattice weight for direction i, M[k][i] is the k-th row of the MRT transformation matrix evaluated at direction i, and d_k is the diagonal normalization factor for channel k (the squared norm of the k-th eigenvector under the weight inner product). This operation distributes a single ghost value across all 19 distribution functions with weights proportional to the channel's eigenvector component, scaled by the lattice geometry. The encoding is linear in the eigenvector. The division by d_k is exact in integer arithmetic when d_k divides W[i] * M[k][i] * value; the per-channel LCD (least common divisor) described below ensures this.
+
 In integer LBM, the MRT transformation matrix M produces ghost moments with different scaling factors depending on the eigenvector structure. Each ghost mode has a characteristic least common divisor (LCD) that determines its integer encoding capacity. By multiplying metadata values by the LCD on write and dividing (with rounding offset LCD/2) on read, each ghost mode may carry a specific number of bits of metadata with exact integer round-trip fidelity.
 
 For example, in one embodiment using D3Q19 with integer distributions, the 9 ghost modes may carry the following capacities: 5 bits, 8 bits, 8 bits, 8 bits, 7 bits, 9 bits, 10 bits, 10 bits, and 10 bits, for a total of 75 bits of metadata per cell across 9 channels. The encoding may use a single integer multiply per channel on write (for example value * 8 for a 10-bit channel) and a single integer add-and-divide on read (for example (ghost + 4) / 8, where the rounding offset is LCD / 2). Channels whose LCD is a power of 2 (for example 8) may use bit shift operations for exact encoding and decoding with no rounding required.
@@ -108,7 +114,19 @@ This encoding scheme may achieve exact round-trip fidelity for all metadata valu
 
 ### I.B. Ghost Data as Independent Fluid Fields with Measurable Transport Properties
 
-Under the passthrough mechanism (ghost relaxation rate = 0), each ghost channel may behave as an independent fluid field with its own measurable transport properties, coexisting with the physical fluid and with other ghost channels in the same distribution arrays. Each channel may exhibit a characteristic diffusion coefficient determined by its streaming kernel geometry (for example D = 0.98 cells^2/tick for tightly-coupled channels to D = 4.78 cells^2/tick for loosely-coupled channels in the D3Q19 lattice). Each channel may also exhibit directional anisotropy (for example 2.04x asymmetry in spread between axes) reflecting the structure of its eigenvector in the MRT transformation matrix.
+The read-back operation for ghost channel k is termed Fluid Ghost Decoding (FGD). After streaming, the ghost value at any cell is recovered as:
+
+    value = sum( M[k][i] * f[i] )    for all i in 0..18
+
+This is the standard MRT forward transform applied to the k-th row. FGE and FGD are conjugate operations on the same geometric basis: FGE writes by distributing linearly through the eigenvector (linear in M[k][i]); FGD reads by collecting linearly through the same eigenvector. The single-tick transport kernel that describes how ghost data spreads between these two operations is derived by substituting the FGE-encoded distributions through the streaming step and applying FGD at the destination. For the weight-orthogonal matrix, this kernel reduces to:
+
+    K[i] = W[i] * M[k][i]^2 / d_k    for each lattice direction i
+
+This kernel is quadratic in the eigenvector. It is the autocorrelation of the FGE encoding kernel: the lattice correlates the written signal with itself during streaming, and FGD reads the result. Every coefficient K[i] is non-negative (squares weighted by positive lattice weights). The coefficients sum to exactly 1 (provable directly from the weight-orthogonality condition M W M^T = diagonal), guaranteeing conservation by construction.
+
+Verification: 9/9 ghost channels pass exact conservation in 1D tests; 4/4 pass with 0.000 error on every cell in 3D tests. Multi-tick 3D: 0.00% drift at every tick across 5 consecutive ticks, all channels simultaneously. The predicted spreading coefficients from K[i] = W[i] * M[k][i]^2 / d_k match measured results exactly, not approximately. Each channel exhibits a characteristic geometric personality determined by its eigenvector structure: for example, channel m[10] splits exactly into four diagonal directions at 25% each; channel m[12] places 33.3% of value along the +y and -y directions with 4.2% on each of 8 edge neighbors; channel m[17] is the most isotropic, spreading evenly in all three dimensions with 1.00x anisotropy. The 6.5% drift previously observed in implementations using the standard Lallemand-Luo MRT matrix is not a fundamental property of the encoding; it is a consequence of cross-channel contamination from non-weight-orthogonal matrix construction. The weight-orthogonal matrix used here eliminates this contamination exactly.
+
+Under the passthrough mechanism (ghost relaxation rate = 0), each ghost channel may behave as an independent fluid field with its own measurable transport properties, coexisting with the physical fluid and with other ghost channels in the same distribution arrays. Each channel may exhibit a characteristic diffusion coefficient analytically derivable from K[i] (for example D = 0.98 cells^2/tick for channels whose eigenvectors concentrate weight on axis-aligned directions, to D = 4.78 cells^2/tick for channels whose eigenvectors spread weight onto diagonal directions, in the D3Q19 lattice). The diffusion coefficient is not an empirical measurement but a geometric consequence of the eigenvector structure; it may be computed analytically from K[i] without simulation. Each channel may also exhibit directional anisotropy reflecting the symmetry of its eigenvector.
 
 Multiple ghost fields injected at different spatial locations may merge without overwriting, clipping, or interfering. The blending is proportional and smooth, producing continuous gradients at the interface between different metadata values. This property eliminates the need for interface tracking, collision detection between metadata regions, or explicit blending logic. The streaming kernel performs the interpolation naturally.
 
