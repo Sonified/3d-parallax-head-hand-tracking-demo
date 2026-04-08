@@ -256,6 +256,7 @@ for (let h = 0; h < 2; h++) {
   const joints = [];
   for (let i = 0; i < JOINT_COUNT; i++) {
     const m = new THREE.Mesh(jointGeo, jMat);
+    m.frustumCulled = false;
     m.visible = false;
     group.add(m);
     joints.push(m);
@@ -265,6 +266,7 @@ for (let h = 0; h < 2; h++) {
   for (const [a, b] of HAND_CONNECTIONS) {
     const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
     const line = new THREE.Line(geo, bMat);
+    line.frustumCulled = false;
     line.visible = false;
     group.add(line);
     bones.push({ line, geo, a, b });
