@@ -98,15 +98,13 @@
 
 <div id="filter-controls">
   <div class="section-label" style="display:flex; justify-content:space-between; align-items:center;">Head <button id="recenter-btn" style="background:#222; color:#4fc3f7; border:1px solid #444; border-radius:4px; padding:2px 8px; font-size:0.75rem; cursor:pointer; font-weight:400;">Recenter</button></div>
-  <div class="param-row"><span class="param-name">Smoothing</span><input type="range" id="head-smooth" min="0.1" max="2" step="0.1" value="0.4"><span class="param-val" id="head-smooth-val">0.4</span></div>
-  <div class="param-row"><span class="param-name">Baseline</span><input type="range" id="head-baseline" min="0.1" max="5" step="0.1" value="2.1"><span class="param-val" id="head-baseline-val">2.1</span></div>
-  <div class="param-row"><span class="param-name">Acceleration</span><input type="range" id="head-accel" min="0" max="0.1" step="0.001" value="0.043"><span class="param-val" id="head-accel-val">0.043</span></div>
+  <div class="param-row"><span class="param-name">Floor</span><input type="range" id="head-floor" min="1" max="100" step="1" value="10"><span class="param-val" id="head-floor-val">0.10</span></div>
+  <div class="param-row"><span class="param-name">Beta</span><input type="range" id="head-beta" min="5" max="100" step="1" value="35"><span class="param-val" id="head-beta-val">3.5</span></div>
   <div class="section-label">Parallax</div>
   <div class="param-row"><span class="param-name">Amount</span><input type="range" id="parallax-amount" min="0" max="2" step="0.05" value="0.7"><span class="param-val" id="parallax-amount-val">0.70</span></div>
   <div class="section-label">Hands</div>
-  <div class="param-row"><span class="param-name">Smoothing</span><input type="range" id="hand-smooth" min="0.1" max="2" step="0.1" value="0.2"><span class="param-val" id="hand-smooth-val">0.2</span></div>
-  <div class="param-row"><span class="param-name">Baseline</span><input type="range" id="hand-baseline" min="0.1" max="5" step="0.1" value="0.8"><span class="param-val" id="hand-baseline-val">0.8</span></div>
-  <div class="param-row"><span class="param-name">Acceleration</span><input type="range" id="hand-accel" min="0" max="0.1" step="0.001" value="0.097"><span class="param-val" id="hand-accel-val">0.097</span></div>
+  <div class="param-row"><span class="param-name">Floor</span><input type="range" id="hand-floor" min="1" max="100" step="1" value="10"><span class="param-val" id="hand-floor-val">0.10</span></div>
+  <div class="param-row"><span class="param-name">Beta</span><input type="range" id="hand-beta" min="5" max="100" step="1" value="35"><span class="param-val" id="hand-beta-val">3.5</span></div>
   <div style="text-align:right; margin-top:8px;"><button id="copy-settings-btn" style="background:#222; color:#4fc3f7; border:1px solid #444; border-radius:4px; padding:3px 10px; font-size:0.8rem; cursor:pointer;">Copy</button></div>
 </div>
 
@@ -376,30 +374,29 @@ class OneEuroFilter {
 // ============================================================
 // Filter Parameters (persisted in localStorage)
 // ============================================================
+// Filter params: Floor (minCutoff) + Beta, matching Spellaria's setup.
+// dCutoff hardcoded at 1.0 (derivative smoothing, not user-facing).
 const FILTER_DEFAULTS = {
-  'head-smooth': '0.4', 'head-baseline': '2.1', 'head-accel': '0.043',
-  'hand-smooth': '0.2', 'hand-baseline': '0.8', 'hand-accel': '0.097',
+  'head-floor': '0.10', 'head-beta': '3.5',
+  'hand-floor': '0.10', 'hand-beta': '3.5',
 };
 function getFilter(key) { const v = localStorage.getItem(key); return parseFloat(v !== null ? v : FILTER_DEFAULTS[key]); }
 
 const filterParams = {
-  head:  { smooth: getFilter('head-smooth'), baseline: getFilter('head-baseline'), accel: getFilter('head-accel') },
-  hand:  { smooth: getFilter('hand-smooth'), baseline: getFilter('hand-baseline'), accel: getFilter('hand-accel') },
+  head: { floor: getFilter('head-floor'), beta: getFilter('head-beta') },
+  hand: { floor: getFilter('hand-floor'), beta: getFilter('hand-beta') },
 };
 
-// Smoothing slider is inverted: higher slider = lower min_cutoff = more smoothing
-function smoothToMinCutoff(sliderVal) { return 1.0 / sliderVal; }
-
-// Head filters: x, y, z
+// Head filters: x, y, z (dCutoff fixed at 1.0)
 const headFilters = ['x', 'y', 'z'].map(() =>
-  new OneEuroFilter(60, smoothToMinCutoff(filterParams.head.smooth), filterParams.head.accel, filterParams.head.baseline)
+  new OneEuroFilter(60, filterParams.head.floor, filterParams.head.beta, 1.0)
 );
 
 // Hand filters: 2 hands x 21 joints x 3 axes
 const handFilters = Array.from({ length: 2 }, () =>
   Array.from({ length: 21 }, () =>
     ['x', 'y', 'z'].map(() =>
-      new OneEuroFilter(60, smoothToMinCutoff(filterParams.hand.smooth), filterParams.hand.accel, filterParams.hand.baseline)
+      new OneEuroFilter(60, filterParams.hand.floor, filterParams.hand.beta, 1.0)
     )
   )
 );
@@ -407,25 +404,33 @@ const handFilters = Array.from({ length: 2 }, () =>
 function updateFilterParams(group, param, value) {
   const flatFilters = group === 'head' ? headFilters : handFilters.flat().flatMap(j => j);
   for (const f of flatFilters) {
-    if (param === 'smooth') f.minCutoff = smoothToMinCutoff(value);
-    else if (param === 'baseline') f.dCutoff = value;
-    else if (param === 'accel') f.beta = value;
+    if (param === 'floor') f.minCutoff = value;
+    else if (param === 'beta') f.beta = value;
   }
 }
 
-// Restore slider UI from saved values and wire up events
+// Restore slider UI and wire up events
+// Floor: slider 1-100 maps to 0.01-1.00 (value/100)
+// Beta: slider 5-100 maps to 0.5-10.0 (value/10)
 for (const group of ['head', 'hand']) {
-  for (const param of ['smooth', 'baseline', 'accel']) {
+  for (const param of ['floor', 'beta']) {
     const slider = document.getElementById(`${group}-${param}`);
     const valEl = document.getElementById(`${group}-${param}-val`);
     const saved = filterParams[group][param];
-    slider.value = saved;
-    valEl.textContent = param === 'accel' ? saved.toFixed(3) : saved.toFixed(1);
+
+    if (param === 'floor') {
+      slider.value = Math.round(saved * 100);
+      valEl.textContent = saved.toFixed(2);
+    } else {
+      slider.value = Math.round(saved * 10);
+      valEl.textContent = saved.toFixed(1);
+    }
 
     slider.addEventListener('input', (e) => {
-      const v = parseFloat(e.target.value);
+      const raw = parseInt(e.target.value);
+      const v = param === 'floor' ? raw / 100 : raw / 10;
       filterParams[group][param] = v;
-      valEl.textContent = param === 'accel' ? v.toFixed(3) : v.toFixed(1);
+      valEl.textContent = param === 'floor' ? v.toFixed(2) : v.toFixed(1);
       setSetting(`${group}-${param}`, v.toString());
       updateFilterParams(group, param, v);
     });
@@ -448,9 +453,9 @@ document.getElementById('recenter-btn').addEventListener('click', () => {
 // Copy settings button
 document.getElementById('copy-settings-btn').addEventListener('click', () => {
   const settings = {
-    head: { smoothing: filterParams.head.smooth, baseline: filterParams.head.baseline, acceleration: filterParams.head.accel },
+    head: { floor: filterParams.head.floor, beta: filterParams.head.beta },
     parallax: { amount: parallaxAmount },
-    hands: { smoothing: filterParams.hand.smooth, baseline: filterParams.hand.baseline, acceleration: filterParams.hand.accel },
+    hands: { floor: filterParams.hand.floor, beta: filterParams.hand.beta },
   };
   navigator.clipboard.writeText(JSON.stringify(settings, null, 2));
   const btn = document.getElementById('copy-settings-btn');
