@@ -100,11 +100,13 @@ No prior art is known for using LBM ghost modes as a general-purpose metadata tr
 
 ### I.A. Integer-Exact Ghost Mode Encoding via LCD-Scaled Channels
 
-The write operation for ghost channel k is termed Fluid Ghost Encoding (FGE). For each lattice direction i in 0..18, FGE adds a weighted contribution to the distribution function at the encoding cell:
+The write operation for ghost channel k is termed Fluid Ghost Encoding (FGE). Its mathematical effect on the distribution functions is:
 
-    f[i] += W[i] * M[k][i] * value / d_k
+    f[i] += W[i] * M[k][i] * value / d_k    for all i in 0..18
 
-where W[i] is the lattice weight for direction i, M[k][i] is the k-th row of the MRT transformation matrix evaluated at direction i, and d_k is the diagonal normalization factor for channel k (the squared norm of the k-th eigenvector under the weight inner product). This operation distributes a single ghost value across all 19 distribution functions with weights proportional to the channel's eigenvector component, scaled by the lattice geometry. The encoding is linear in the eigenvector. The division by d_k is exact in integer arithmetic when d_k divides W[i] * M[k][i] * value; the per-channel LCD (least common divisor) described below ensures this.
+where W[i] is the lattice weight for direction i, M[k][i] is the k-th row of the MRT transformation matrix evaluated at direction i, and d_k is the diagonal normalization factor for channel k (the squared norm of the k-th eigenvector under the weight inner product). The encoding is linear in the eigenvector.
+
+In practice, this operation is not implemented as a separate per-distribution-function pass. The standard MRT collision pipeline is: (1) m = M @ f, (2) relax physical moments m[0..9], (3) leave ghost moments m[10..18] unchanged (passthrough: relaxation rate = 0), (4) f = M_inv @ m, (5) stream. Ghost injection is implemented by setting m[k] = value * LCD in step 1's output before step 4. This is one integer assignment per injected channel, inside the collision step already being performed. The f[i] += form above is the mathematical expansion of what M_inv @ m does to that assignment; no additional matrix multiply is required. Verified in ghost_zero_cost_proof.py: all 9 channels, 0.000 error, full encode-stream-decode loop.
 
 In integer LBM, the MRT transformation matrix M produces ghost moments with different scaling factors depending on the eigenvector structure. Each ghost mode has a characteristic least common divisor (LCD) that determines its integer encoding capacity. By multiplying metadata values by the LCD on write and dividing (with rounding offset LCD/2) on read, each ghost mode may carry a specific number of bits of metadata with exact integer round-trip fidelity.
 
@@ -118,7 +120,14 @@ The read-back operation for ghost channel k is termed Fluid Ghost Decoding (FGD)
 
     value = sum( M[k][i] * f[i] )    for all i in 0..18
 
-This is the standard MRT forward transform applied to the k-th row. FGE and FGD are conjugate operations on the same geometric basis: FGE writes by distributing linearly through the eigenvector (linear in M[k][i]); FGD reads by collecting linearly through the same eigenvector. The single-tick transport kernel that describes how ghost data spreads between these two operations is derived by substituting the FGE-encoded distributions through the streaming step and applying FGD at the destination. For the weight-orthogonal matrix, this kernel reduces to:
+This is the standard MRT forward transform applied to the k-th row — it is step 1 of every LBM collision: m = M @ f. Ghost mode values are rows 10-18 of the moment vector m that collision computes at every cell every tick as the first step of the physical computation. FGD is not a separate decode call. It is reading m[k] from the vector already computed. The encode, transport, and decode pipeline therefore has the following cost structure:
+
+    Encode: zero extra ops (set m[k] = value * LCD before M_inv@m, inside collision)
+    Transport: zero extra ops (streaming, already performed)
+    Decode: zero extra ops (read m[k] from M@f, already performed at start of collision)
+    Total additional cost: ZERO
+
+FGE and FGD are conjugate operations on the same geometric basis: FGE writes by distributing linearly through the eigenvector (linear in M[k][i]); FGD reads by collecting linearly through the same eigenvector. The single-tick transport kernel that describes how ghost data spreads between these two operations is derived by substituting the FGE-encoded distributions through the streaming step and applying FGD at the destination. For the weight-orthogonal matrix, this kernel reduces to:
 
     K[i] = W[i] * M[k][i]^2 / d_k    for each lattice direction i
 
