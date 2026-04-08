@@ -831,4 +831,58 @@ No prior art is known for coupling multiple LBM simulation domains through ghost
 
 ---
 
+## Appendix II. D3Q19 Ghost Channel Geometric Personalities
+
+The nine ghost channels in D3Q19 are not generic storage slots. Each channel is a resonant eigenmode of the lattice geometry, with a characteristic spatial spreading pattern determined entirely by its eigenvector structure via the transport kernel K[i] = W[i] * M[k][i]^2 / d_k. The channels organize naturally into four groups.
+
+### Group 1: Shear Plane (1 channel)
+
+**m[10] — The Shear Plane**
+Eigenvector nonzero only on the four xz face diagonals (directions 11-14). Kernel weight is zero on all other directions. Data encoded in this channel spreads in a flat sheet through the xz plane and is completely blind to the y axis (Dy = 0 exactly). Of all nine channels, m[10] has the tightest spatial confinement: it communicates with only four of the eighteen neighbors. LCD = 4, giving the highest per-value encoding capacity of all ghost channels.
+
+### Group 2: Directional Beams (3 channels)
+
+**m[11] — The X Beam**
+Two-thirds of kernel weight on the pure +x and -x directions, one-third leaking into the eight edge diagonals with an x component. Anisotropy approximately 6x, x-dominant. Self-retention zero: this channel evacuates completely each tick, sending the bulk of its data along the x axis with a faint spray into the diagonals.
+
+**m[12] — The Y Beam**
+Same structure as m[11], rotated to the y axis. Two-thirds of weight on pure +y and -y, diagonal leakage into y-component edges. 6x anisotropy, y-dominant. Channels m[11] and m[12] are twins: same diffusion rate, same anisotropy, different orientation.
+
+**m[13] — The Z Beam**
+The third twin. Two-thirds of weight on pure +z and -z. Completes the directional triplet. Channels m[11], m[12], and m[13] together form a natural coordinate basis: one beam per axis, each component diffusing preferentially along its own axis. A vector quantity encoded across these three channels decomposes naturally along the lattice axes.
+
+### Group 3: Diagonal Crosses (3 channels)
+
+**m[14] — The YZ Cross**
+Kernel weight distributed equally across the eight edge diagonals with y and/or z components, zero on x-only diagonals. No axis-aligned component. Anisotropy approximately 2x, y-dominant. D approximately 1.0 cells^2/tick. Where m[10] spreads in a flat sheet through one plane, m[14] spreads as a three-dimensional diagonal spray biased toward y.
+
+**m[15] — The XZ Cross**
+Sibling of m[14], rotated. Eight edge diagonals with x and/or z components. 2x anisotropy, z-dominant.
+
+**m[16] — The XY Cross**
+Third cross mode. Eight edge diagonals with x and/or y components. 2x anisotropy, x-dominant. Self-retention zero.
+
+### Group 4: Isotropic Breaths (2 channels)
+
+**m[17] — The Breath**
+Kernel weight on all 18 non-rest directions. Anisotropy 1.00x. Perfectly isotropic: spreads equally in every direction like a sphere expanding. D approximately 0.75 cells^2/tick. If data should diffuse like heat, like pressure, or like a point source radiating uniformly, this is the channel. LCD = 48, the highest of any channel, meaning it carries the fewest bits per value; the cost of isotropy is encoding capacity.
+
+**m[18] — The Second Breath**
+Also isotropic (1.00x anisotropy), also D approximately 0.75. Different internal eigenvector wiring: omits the x-axis directions and xy-plane diagonals, compensating by weighting the remaining directions more heavily. Same effective spreading behavior, independent channel. LCD = 16, so it carries more bits per value than m[17]. The lattice provides exactly two independent isotropic modes.
+
+### Summary
+
+The nine channels organize by symmetry group:
+
+    1 shear plane    (m[10])          — 2D, 4 neighbors, tightest confinement
+    3 directional beams (m[11-13])    — 1D dominant, axis-aligned triplet
+    3 diagonal crosses  (m[14-16])    — 3D diagonal, no axis-aligned weight
+    2 isotropic breaths (m[17-18])    — perfectly isotropic, independent
+
+    1 + 3 + 3 + 2 = 9
+
+This grouping is not assigned. It is the natural consequence of the MRT transformation matrix's eigenvector structure applied to D3Q19 lattice geometry. The physical intuition matches: the beams are the shear stress modes projected onto individual axes; the crosses are the off-diagonal stress modes; the breaths are the energy and energy-flux modes that have been re-orthogonalized under the weight inner product. The lattice had this structure for 30 years. The ghost channels are its unused harmonics.
+
+---
+
 The source code in this repository is released under the MIT License. This document is a public technical disclosure establishing prior art; it is not a license grant for any patent claims.
