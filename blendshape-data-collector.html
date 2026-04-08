@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Blendshape Training Data Collector</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; margin: 20px; }
+  video { width: 320px; border: 1px solid #333; }
+  canvas { border: 1px solid #444; margin: 4px; }
+  button { font-size: 16px; padding: 8px 16px; margin: 10px 4px; cursor: pointer; }
+  button:disabled { opacity: 0.4; }
+  #status { margin: 10px 0; color: #aaa; }
+  #stats { margin: 10px 0; color: #4fc3f7; font-size: 14px; }
+  .recording { color: #ff4444; font-weight: bold; }
+  #preview { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  #expressions { margin: 10px 0; padding: 10px; background: #1a1a1a; border: 1px solid #333; font-size: 13px; display: flex; flex-direction: column; }
+  .bar-row { display: flex; align-items: center; margin: 0; line-height: 1; }
+  .bar-label { min-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #888; font-size: 11px; transition: all 0.3s; }
+  .bar-bg { flex: 1; height: 6px; background: #222; border-radius: 2px; overflow: hidden; position: relative; }
+  .bar-cov { position: absolute; top: 0; left: 0; height: 100%; background: #0f0; opacity: 0.3; transition: width 0.3s; }
+  .bar-live { position: absolute; top: 0; left: 0; height: 100%; background: #4fc3f7; transition: width 0.05s; }
+</style>
+</head>
+<body>
+<h2>Blendshape Training Data Collector</h2>
+<p>Runs full face pipeline (detector + landmarks + blendshapes). Records 128x128 face crops paired with 52 blendshape coefficients.<br>
+Make varied expressions: smile, frown, raise eyebrows, open mouth, blink, look around, puff cheeks, etc.</p>
+
+<video id="video" autoplay playsinline muted></video>
+<canvas id="crop-preview" width="128" height="128"></canvas>
+<br>
+<button id="start-btn">Start Camera + Pipeline</button>
+<button id="record-btn" disabled>Record</button>
+<button id="stop-btn" disabled>Stop</button>
+<button id="download-btn" disabled>Download Dataset</button>
+<div id="status">Click Start to initialize the full face pipeline.</div>
+<div id="stats"></div>
+
+<div id="expressions"></div>
+
+<div id="prompt" style="font-size: 1.5rem; color: #ff0; margin: 10px 0;"></div>
+
+<div id="coverage" style="margin: 10px 0;">
+  <span style="font-weight: bold;">Coverage: </span><span id="coverage-pct" style="color: #0f0;">0%</span>
+  <span id="missing-list" style="margin-left: 12px; color: #ff4444; font-size: 12px;"></span>
+</div>
+
+<script type="module">
+// Dynamic import to handle ONNX RT's module resolution
+const { FaceTracker } = await import('./gpu-vision/src/face-pipeline.js');
+
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const statsEl = document.getElementById('stats');
+const startBtn = document.getElementById('start-btn');
+const recordBtn = document.getElementById('record-btn');
+const stopBtn = document.getElementById('stop-btn');
+const downloadBtn = document.getElementById('download-btn');
+const cropCanvas = document.getElementById('crop-preview');
+const cropCtx = cropCanvas.getContext('2d');
+const expressionsEl = document.getElementById('expressions');
+const promptEl = document.getElementById('prompt');
+
+const CROP_SIZE = 128;
+const BLENDSHAPE_NAMES = [
+  '_neutral', 'browDownLeft', 'browDownRight', 'browInnerUp',
+  'browOuterUpLeft', 'browOuterUpRight', 'cheekPuff',
+  'cheekSquintLeft', 'cheekSquintRight', 'eyeBlinkLeft',
+  'eyeBlinkRight', 'eyeLookDownLeft', 'eyeLookDownRight',
+  'eyeLookInLeft', 'eyeLookInRight', 'eyeLookOutLeft',
+  'eyeLookOutRight', 'eyeLookUpLeft', 'eyeLookUpRight',
+  'eyeSquintLeft', 'eyeSquintRight', 'eyeWideLeft', 'eyeWideRight',
+  'jawForward', 'jawLeft', 'jawOpen', 'jawRight',
+  'mouthClose', 'mouthDimpleLeft', 'mouthDimpleRight',
+  'mouthFrownLeft', 'mouthFrownRight', 'mouthFunnel', 'mouthLeft',
+  'mouthLowerDownLeft', 'mouthLowerDownRight', 'mouthPressLeft',
+  'mouthPressRight', 'mouthPucker', 'mouthRight',
+  'mouthRollLower', 'mouthRollUpper', 'mouthShrugLower',
+  'mouthShrugUpper', 'mouthSmileLeft', 'mouthSmileRight',
+  'mouthStretchLeft', 'mouthStretchRight', 'mouthUpperUpLeft',
+  'mouthUpperUpRight', 'noseSneerLeft', 'noseSneerRight',
+];
+
+// Expression prompts to guide varied data collection
+const PROMPTS = [
+  'Neutral face', 'Big smile!', 'Frown', 'Surprise! (eyes wide, mouth open)',
+  'Raise eyebrows', 'Close left eye', 'Close right eye', 'Blink both eyes',
+  'Open mouth wide', 'Puff cheeks', 'Pucker lips', 'Look left',
+  'Look right', 'Look up', 'Look down', 'Jaw left', 'Jaw right',
+  'Scrunch nose', 'Smile with teeth', 'Sad face', 'Angry face',
+  'Move around slowly', 'Turn head slightly left', 'Turn head slightly right',
+  'Tilt head left', 'Tilt head right', 'Free expression!',
+];
+
+let faceTracker = null;
+let recording = false;
+let dataset = []; // Array of { crop: Uint8Array(128*128*3), blendshapes: Float32Array(52) }
+let frameCount = 0;
+let promptIdx = 0;
+let promptTimer = null;
+
+// Coverage tracking: max activation seen per blendshape + frame count where it was > 0.3
+const coverage = new Float32Array(52); // max value ever seen
+const coverageFrames = new Uint32Array(52); // frames where value > 0.3
+const ACTIVATION_THRESHOLD = 0.3; // consider "activated" above this
+const GOOD_COVERAGE_FRAMES = 30; // need this many activated frames
+
+// Friendly names for coaching
+const COACH_MAP = {
+  1: 'Lower your LEFT eyebrow',
+  2: 'Lower your RIGHT eyebrow',
+  3: 'Raise both eyebrows (inner)',
+  4: 'Raise LEFT outer eyebrow',
+  5: 'Raise RIGHT outer eyebrow',
+  6: 'Puff your cheeks!',
+  7: 'Squint LEFT cheek (smile squint)',
+  8: 'Squint RIGHT cheek',
+  9: 'Blink LEFT eye',
+  10: 'Blink RIGHT eye',
+  11: 'Look DOWN-LEFT',
+  12: 'Look DOWN-RIGHT',
+  13: 'Look IN-LEFT (cross-eyed)',
+  14: 'Look IN-RIGHT',
+  15: 'Look OUT-LEFT',
+  16: 'Look OUT-RIGHT',
+  17: 'Look UP-LEFT',
+  18: 'Look UP-RIGHT',
+  19: 'Squint LEFT eye',
+  20: 'Squint RIGHT eye',
+  21: 'Eyes WIDE open LEFT',
+  22: 'Eyes WIDE open RIGHT',
+  23: 'Push jaw FORWARD',
+  24: 'Move jaw LEFT',
+  25: 'Open mouth WIDE',
+  26: 'Move jaw RIGHT',
+  27: 'Close mouth tight (press lips)',
+  28: 'Dimple LEFT (smirk left)',
+  29: 'Dimple RIGHT (smirk right)',
+  30: 'Frown LEFT',
+  31: 'Frown RIGHT',
+  32: 'Funnel lips (say "ooo")',
+  33: 'Slide mouth LEFT',
+  34: 'Lower lip DOWN-LEFT',
+  35: 'Lower lip DOWN-RIGHT',
+  36: 'Press LEFT lip',
+  37: 'Press RIGHT lip',
+  38: 'Pucker lips (kiss face)',
+  39: 'Slide mouth RIGHT',
+  40: 'Roll LOWER lip in',
+  41: 'Roll UPPER lip in',
+  42: 'Shrug LOWER lip up',
+  43: 'Shrug UPPER lip up',
+  44: 'Smile LEFT only',
+  45: 'Smile RIGHT only',
+  46: 'Stretch mouth LEFT',
+  47: 'Stretch mouth RIGHT',
+  48: 'Upper lip up LEFT (snarl left)',
+  49: 'Upper lip up RIGHT (snarl right)',
+  50: 'Scrunch nose LEFT',
+  51: 'Scrunch nose RIGHT',
+};
+
+const coverageBarsEl = document.getElementById('coverage-bars');
+const coveragePctEl = document.getElementById('coverage-pct');
+const missingEl = document.getElementById('missing-list');
+
+let _lastCoverageRender = 0;
+
+function updateCoverage(bs) {
+  for (let i = 1; i < 52; i++) {
+    const v = bs[i];
+    if (v > coverage[i]) coverage[i] = v;
+    if (v > ACTIVATION_THRESHOLD) coverageFrames[i]++;
+  }
+
+  // Update coverage bar fills + labels
+  let covered = 0;
+  const missing = [];
+  for (let i = 1; i < 52; i++) {
+    const pct = Math.min(1, coverageFrames[i] / GOOD_COVERAGE_FRAMES);
+    const covColor = pct >= 1 ? '#0f0' : pct > 0.3 ? '#ff0' : '#f44';
+    _barEls.cov[i - 1].style.width = (pct * 100) + '%';
+    _barEls.cov[i - 1].style.background = covColor;
+    _barEls.cov[i - 1].style.opacity = pct >= 1 ? '0.25' : '0.4';
+    // Show coach text for untrained ones
+    // Continuous scaling: inverse of completion drives size
+    const need = 1 - pct; // 1 = totally untrained, 0 = done
+    const fontSize = 7 + need * 14; // 7px (done) to 21px (untrained)
+    const barHeight = 2 + need * 14; // 2px to 16px
+    const margin = need * 4; // 0px to 4px
+    const opacity = 0.3 + need * 0.7; // 0.3 to 1.0
+    const labelWidth = 120 + need * 250; // 120px to 370px
+
+    _barEls.labels[i - 1].textContent = need > 0.7 ? (COACH_MAP[i] || BLENDSHAPE_NAMES[i]) : BLENDSHAPE_NAMES[i];
+    _barEls.labels[i - 1].style.color = need > 0.7 ? '#fff' : need > 0 ? '#aaa' : '#555';
+    _barEls.labels[i - 1].style.fontSize = fontSize + 'px';
+    _barEls.labels[i - 1].style.fontWeight = need > 0.5 ? 'bold' : 'normal';
+    _barEls.labels[i - 1].style.width = labelWidth + 'px';
+    _barEls.rows[i - 1].style.cssText = `display:flex;align-items:center;margin:${margin}px 0;opacity:${opacity};transition:all 0.3s;`;
+    _barEls.live[i - 1].parentElement.style.height = barHeight + 'px';
+    if (pct >= 1) covered++;
+    else if (pct < 0.3) missing.push(i);
+  }
+
+  sortBarsByNeed();
+
+  const totalPct = Math.round(covered / 51 * 100);
+  coveragePctEl.textContent = totalPct + '%';
+  coveragePctEl.style.color = totalPct >= 90 ? '#0f0' : totalPct >= 50 ? '#ff0' : '#f44';
+
+  if (missing.length > 0) {
+    const top3 = missing.slice(0, 3).map(i => '<span style="color:#ff0">' + (COACH_MAP[i] || BLENDSHAPE_NAMES[i]) + '</span>');
+    missingEl.innerHTML = '<b>DO THIS:</b> ' + top3.join(' | ');
+  } else if (covered === 51) {
+    missingEl.innerHTML = '<span style="color:#0f0; font-size:1.2em">ALL BLENDSHAPES COVERED!</span>';
+  } else {
+    missingEl.innerHTML = '<b>Almost there!</b> Keep holding the yellow ones longer.';
+  }
+}
+
+// Unified bars: coverage (green bg) + live activity (blue overlay), sorted by need
+let _barEls = { live: [], cov: [], labels: [], rows: [] };
+
+function initUnifiedBars() {
+  let html = '';
+  for (let i = 1; i < 52; i++) {
+    html += `<div class="bar-row" id="row${i}"><span class="bar-label" id="lbl${i}">${BLENDSHAPE_NAMES[i]}</span><div class="bar-bg"><div class="bar-cov" id="cbar${i}"></div><div class="bar-live" id="lbar${i}"></div></div></div>`;
+  }
+  expressionsEl.innerHTML = html;
+  _barEls.live = []; _barEls.cov = []; _barEls.labels = []; _barEls.rows = [];
+  for (let i = 1; i < 52; i++) {
+    _barEls.live.push(document.getElementById('lbar' + i));
+    _barEls.cov.push(document.getElementById('cbar' + i));
+    _barEls.labels.push(document.getElementById('lbl' + i));
+    _barEls.rows.push(document.getElementById('row' + i));
+  }
+}
+initUnifiedBars();
+
+function updateBars(blendshapes) {
+  for (let i = 0; i < _barEls.live.length; i++) {
+    _barEls.live[i].style.width = (Math.min(1, Math.max(0, blendshapes[i + 1])) * 100) + '%';
+  }
+}
+
+let _lastSort = 0;
+function sortBarsByNeed() {
+  const now = performance.now();
+  if (now - _lastSort < 500) return;
+  _lastSort = now;
+
+  const items = [];
+  for (let i = 1; i < 52; i++) {
+    items.push({ idx: i, pct: Math.min(1, coverageFrames[i] / GOOD_COVERAGE_FRAMES) });
+  }
+  items.sort((a, b) => a.pct - b.pct);
+
+  for (const item of items) {
+    expressionsEl.appendChild(_barEls.rows[item.idx - 1]);
+  }
+}
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  statusEl.textContent = 'Starting camera...';
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } }
+  });
+  video.srcObject = stream;
+  await video.play();
+
+  statusEl.textContent = 'Loading face pipeline (detector + landmarks + blendshapes)...';
+
+  faceTracker = new FaceTracker(1);
+  await faceTracker.init((msg) => { statusEl.textContent = msg; });
+
+  statusEl.textContent = 'Pipeline ready. Hit Record to start collecting data.';
+  recordBtn.disabled = false;
+
+  // Start processing loop
+  processLoop();
+});
+
+async function processLoop() {
+  if (video.readyState < 2) {
+    requestAnimationFrame(processLoop);
+    return;
+  }
+
+  const result = await faceTracker.processFrame(video, { runBlendshapes: true });
+
+  if (result.faces && result.faces.length > 0) {
+    const face = result.faces[0];
+    const lm = face.landmarks;
+    const bs = face.blendshapes;
+
+    if (lm && lm.length > 0 && bs && bs.length >= 52) {
+      // Compute face bounding box from landmarks
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const p of lm) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+
+      // Expand to square with margin
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const size = Math.max(maxX - minX, maxY - minY) * 1.4;
+      const x0 = cx - size / 2;
+      const y0 = cy - size / 2;
+
+      // Draw crop preview
+      const vw = video.videoWidth, vh = video.videoHeight;
+      cropCtx.clearRect(0, 0, CROP_SIZE, CROP_SIZE);
+      cropCtx.drawImage(video,
+        x0 * vw, y0 * vh, size * vw, size * vh,
+        0, 0, CROP_SIZE, CROP_SIZE
+      );
+
+      // Update blendshape bars + coverage (always track, even before recording)
+      updateBars(bs);
+      updateCoverage(bs);
+
+      // Record if active
+      if (recording) {
+        const imageData = cropCtx.getImageData(0, 0, CROP_SIZE, CROP_SIZE);
+        const rgb = new Uint8Array(CROP_SIZE * CROP_SIZE * 3);
+        for (let i = 0; i < CROP_SIZE * CROP_SIZE; i++) {
+          rgb[i * 3]     = imageData.data[i * 4];
+          rgb[i * 3 + 1] = imageData.data[i * 4 + 1];
+          rgb[i * 3 + 2] = imageData.data[i * 4 + 2];
+        }
+        dataset.push({
+          crop: rgb,
+          blendshapes: new Float32Array(bs),
+        });
+        frameCount++;
+        statsEl.textContent = `Recorded: ${frameCount} frames (${(frameCount * (CROP_SIZE * CROP_SIZE * 3 + 52 * 4) / 1024 / 1024).toFixed(1)} MB)`;
+      }
+    }
+  }
+
+  if (!document.hidden) requestAnimationFrame(processLoop);
+}
+
+recordBtn.addEventListener('click', () => {
+  recording = true;
+  recordBtn.disabled = true;
+  stopBtn.disabled = false;
+  statusEl.innerHTML = '<span class="recording">RECORDING</span> -- Make varied expressions! Follow the prompts.';
+
+  // Start cycling prompts
+  promptIdx = 0;
+  promptEl.textContent = PROMPTS[0];
+  promptTimer = setInterval(() => {
+    promptIdx = (promptIdx + 1) % PROMPTS.length;
+    promptEl.textContent = PROMPTS[promptIdx];
+  }, 5000); // New prompt every 5 seconds
+});
+
+stopBtn.addEventListener('click', () => {
+  recording = false;
+  stopBtn.disabled = true;
+  recordBtn.disabled = false;
+  downloadBtn.disabled = false;
+  clearInterval(promptTimer);
+  promptEl.textContent = '';
+  statusEl.textContent = `Stopped. ${frameCount} frames recorded. Click Download to save.`;
+});
+
+downloadBtn.addEventListener('click', () => {
+  statusEl.textContent = 'Packing dataset...';
+
+  // Pack into a single binary blob:
+  // Header: 4 bytes (uint32 frame count)
+  // Per frame: 128*128*3 bytes (RGB crop) + 52*4 bytes (float32 blendshapes)
+  const CROP_BYTES = CROP_SIZE * CROP_SIZE * 3;
+  const BS_BYTES = 52 * 4;
+  const FRAME_BYTES = CROP_BYTES + BS_BYTES;
+  const totalBytes = 4 + dataset.length * FRAME_BYTES;
+
+  const buffer = new ArrayBuffer(totalBytes);
+  const view = new DataView(buffer);
+  view.setUint32(0, dataset.length, true);
+
+  for (let i = 0; i < dataset.length; i++) {
+    const offset = 4 + i * FRAME_BYTES;
+    const cropArr = new Uint8Array(buffer, offset, CROP_BYTES);
+    cropArr.set(dataset[i].crop);
+    const bsArr = new Float32Array(buffer, offset + CROP_BYTES, 52);
+    bsArr.set(dataset[i].blendshapes);
+  }
+
+  const blob = new Blob([buffer], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `blendshape-training-${dataset.length}frames-${Date.now()}.bin`;
+  a.click();
+  URL.revokeObjectURL(url);
+
+  statusEl.textContent = `Downloaded ${dataset.length} frames (${(totalBytes / 1024 / 1024).toFixed(1)} MB)`;
+});
+</script>
+</body>
+</html>

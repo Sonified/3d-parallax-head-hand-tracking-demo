@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pixel Face</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; margin: 20px; display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { border: 1px solid #444; image-rendering: pixelated; }
+  .label { text-align: center; color: #888; font-size: 12px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div><video id="v" autoplay playsinline muted width="256"></video><div class="label">Camera</div></div>
+<div><canvas id="c128" width="128" height="128" style="width:256px;height:256px;"></canvas><div class="label">128x128 face crop</div></div>
+<div><canvas id="c64" width="64" height="64" style="width:256px;height:256px;"></canvas><div class="label">64x64 face crop</div></div>
+<div><canvas id="c32" width="32" height="32" style="width:256px;height:256px;"></canvas><div class="label">32x32 face crop</div></div>
+<div><canvas id="c16" width="16" height="16" style="width:256px;height:256px;"></canvas><div class="label">16x16 face crop</div></div>
+<div><canvas id="g32" width="32" height="32" style="width:256px;height:256px;"></canvas><div class="label">32x32 grayscale crop</div></div>
+<div id="status" style="width:100%; color:#888;">Loading face detector...</div>
+<script type="module">
+const v = document.getElementById('v');
+const statusEl = document.getElementById('status');
+const sizes = [
+  { c: document.getElementById('c128'), s: 128 },
+  { c: document.getElementById('c64'), s: 64 },
+  { c: document.getElementById('c32'), s: 32 },
+  { c: document.getElementById('c16'), s: 16 },
+];
+const g32 = document.getElementById('g32');
+const g32ctx = g32.getContext('2d');
+
+// Import face tracker for face detection
+const { FaceTracker } = await import('./gpu-vision/src/face-pipeline.js');
+
+const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 480, height: 360 } });
+v.srcObject = stream;
+await v.play();
+
+statusEl.textContent = 'Loading face pipeline...';
+const tracker = new FaceTracker(1);
+await tracker.init((msg) => { statusEl.textContent = msg; });
+statusEl.textContent = 'Tracking!';
+
+// Face bounding box from landmarks
+let faceBox = null; // { x, y, w, h } in normalized coords
+
+async function loop() {
+  const result = await tracker.processFrame(v, { runBlendshapes: false });
+  if (result.faces && result.faces.length > 0) {
+    const lm = result.faces[0].landmarks;
+    if (lm && lm.length > 0) {
+      let minX = 1, minY = 1, maxX = 0, maxY = 0;
+      for (const p of lm) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const size = Math.max(maxX - minX, maxY - minY) * 1.4;
+      faceBox = { x: cx - size / 2, y: cy - size / 2, w: size, h: size };
+    }
+  }
+
+  if (faceBox) {
+    const vw = v.videoWidth, vh = v.videoHeight;
+    const sx = faceBox.x * vw, sy = faceBox.y * vh, sw = faceBox.w * vw, sh = faceBox.h * vh;
+
+    for (const { c, s } of sizes) {
+      const ctx = c.getContext('2d');
+      ctx.clearRect(0, 0, s, s);
+      ctx.drawImage(v, sx, sy, sw, sh, 0, 0, s, s);
+    }
+
+    g32ctx.clearRect(0, 0, 32, 32);
+    g32ctx.drawImage(v, sx, sy, sw, sh, 0, 0, 32, 32);
+    const img = g32ctx.getImageData(0, 0, 32, 32);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const gray = img.data[i] * 0.299 + img.data[i+1] * 0.587 + img.data[i+2] * 0.114;
+      img.data[i] = img.data[i+1] = img.data[i+2] = gray;
+    }
+    g32ctx.putImageData(img, 0, 0);
+  }
+
+  if (!document.hidden) requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
