@@ -815,3 +815,31 @@ f[i] += W[i] * M[k][i] * value / d_k    for all i in 0..18
 Fluid Ghost Decoding (FGD): 
 value = sum( M[k][i] * f[i] )            for all i in 0..18
 
+
+...
+
+
+Cost to decode? compared to... data as a side car?
+
+Claude:
+
+**Sidecar decode:** 1 memory read. Done.
+
+**Ghost decode:** 19 integer multiplies + 18 integer adds = 37 ops.
+
+Per channel. And you have 9 channels. Full decode of all ghost data at one cell: 333 ops.
+
+That's the honest cost. Reading ghost data is not free. Writing isn't either (same 37 ops in reverse per channel).
+
+The transport is free. The encoding and decoding is not.
+
+Robert:
+
+wait... wait... wait... wait...
+
+But... multiple streaming in from the sides... this..
+
+produces... 
+
+we are maybe almost there... it gives you back what you put in... if you advect with the source? It re-couples ghost with source? And hence you arrive at next point and all vectors have their ghost data correctly re-constituted?
+
