@@ -65,6 +65,14 @@
   #filter-controls .param-val {
     width: 40px; text-align: right; color: #4fc3f7; font-size: 0.8rem; font-weight: 600;
   }
+  #self-view {
+    position: fixed; bottom: 16px; right: 16px; z-index: 10;
+    border-radius: 10px; overflow: hidden;
+    border: 1px solid #444;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.7);
+    display: none; width: 240px;
+  }
+  #self-view canvas { display: block; width: 100%; height: auto; }
 </style>
 </head>
 <body>
@@ -94,11 +102,11 @@
   <div class="param-row"><span class="param-name">Baseline</span><input type="range" id="head-baseline" min="0.1" max="5" step="0.1" value="2.1"><span class="param-val" id="head-baseline-val">2.1</span></div>
   <div class="param-row"><span class="param-name">Acceleration</span><input type="range" id="head-accel" min="0" max="0.1" step="0.001" value="0.043"><span class="param-val" id="head-accel-val">0.043</span></div>
   <div class="section-label">Parallax</div>
-  <div class="param-row"><span class="param-name">Amount</span><input type="range" id="parallax-amount" min="0" max="2" step="0.05" value="0.5"><span class="param-val" id="parallax-amount-val">0.50</span></div>
+  <div class="param-row"><span class="param-name">Amount</span><input type="range" id="parallax-amount" min="0" max="2" step="0.05" value="0.7"><span class="param-val" id="parallax-amount-val">0.70</span></div>
   <div class="section-label">Hands</div>
-  <div class="param-row"><span class="param-name">Smoothing</span><input type="range" id="hand-smooth" min="0.1" max="2" step="0.1" value="0.7"><span class="param-val" id="hand-smooth-val">0.7</span></div>
-  <div class="param-row"><span class="param-name">Baseline</span><input type="range" id="hand-baseline" min="0.1" max="5" step="0.1" value="1.0"><span class="param-val" id="hand-baseline-val">1.0</span></div>
-  <div class="param-row"><span class="param-name">Acceleration</span><input type="range" id="hand-accel" min="0" max="0.1" step="0.001" value="0.01"><span class="param-val" id="hand-accel-val">0.010</span></div>
+  <div class="param-row"><span class="param-name">Smoothing</span><input type="range" id="hand-smooth" min="0.1" max="2" step="0.1" value="0.2"><span class="param-val" id="hand-smooth-val">0.2</span></div>
+  <div class="param-row"><span class="param-name">Baseline</span><input type="range" id="hand-baseline" min="0.1" max="5" step="0.1" value="0.8"><span class="param-val" id="hand-baseline-val">0.8</span></div>
+  <div class="param-row"><span class="param-name">Acceleration</span><input type="range" id="hand-accel" min="0" max="0.1" step="0.001" value="0.097"><span class="param-val" id="hand-accel-val">0.097</span></div>
   <div style="text-align:right; margin-top:8px;"><button id="copy-settings-btn" style="background:#222; color:#4fc3f7; border:1px solid #444; border-radius:4px; padding:3px 10px; font-size:0.8rem; cursor:pointer;">Copy</button></div>
 </div>
 
@@ -111,9 +119,12 @@
   <div><span class="label">Gesture: </span><span id="gesture-state" class="val">--</span></div>
   <div><span class="label">FPS: </span><span id="fps" class="val">--</span> <button id="fps-cap-btn" style="background:#222; color:#888; border:1px solid #444; border-radius:3px; padding:1px 6px; font-size:0.7rem; cursor:pointer; margin-left:6px;">Cap</button></div>
   <div><span class="label">Backend: </span><span id="backend-label" class="val">--</span></div>
+  <div style="margin-top:6px;"><button id="self-view-btn" style="background:#222; color:#888; border:1px solid #444; border-radius:4px; padding:3px 10px; font-size:0.8rem; cursor:pointer; width:100%;">Self View</button></div>
 </div>
 
 <div id="winner" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:20; font-size:4rem; font-weight:700; color:#fff; font-family:system-ui,sans-serif;">You Win!</div>
+
+<div id="self-view"><canvas id="self-view-canvas" width="240" height="180"></canvas></div>
 
 <video id="webcam" autoplay playsinline style="display:none;"></video>
 
@@ -367,7 +378,7 @@ class OneEuroFilter {
 // ============================================================
 const FILTER_DEFAULTS = {
   'head-smooth': '0.4', 'head-baseline': '2.1', 'head-accel': '0.043',
-  'hand-smooth': '0.7', 'hand-baseline': '1.0', 'hand-accel': '0.01',
+  'hand-smooth': '0.2', 'hand-baseline': '0.8', 'hand-accel': '0.097',
 };
 function getFilter(key) { const v = localStorage.getItem(key); return parseFloat(v !== null ? v : FILTER_DEFAULTS[key]); }
 
@@ -455,11 +466,12 @@ let refEyeDist = 0;
 const headOffset = { x: 0, y: 0, z: 0 }; // subtracted from raw to recenter
 const headRaw = { x: 0, y: 0, z: 0 };    // last raw values before offset
 let headCalibrated = false;               // auto-recenter on first detection in relative mode
+let faceKeypoints = null;                 // latest eye keypoints for self-view overlay
 
 const PARALLAX_X = 6;
 const PARALLAX_Y = 4;
 const PARALLAX_Z = 3;
-let parallaxAmount = parseFloat((v => v !== null ? v : '1.0')(localStorage.getItem('parallax-amount')));
+let parallaxAmount = parseFloat((v => v !== null ? v : '0.7')(localStorage.getItem('parallax-amount')));
 
 // Parallax amount slider
 const parallaxAmountSlider = document.getElementById('parallax-amount');
@@ -471,6 +483,76 @@ parallaxAmountSlider.addEventListener('input', (e) => {
   parallaxAmountVal.textContent = parallaxAmount.toFixed(2);
   setSetting('parallax-amount', parallaxAmount.toString());
 });
+
+// ============================================================
+// Self View
+// ============================================================
+let selfViewVisible = getSetting('selfView') === 'true';
+const selfViewEl = document.getElementById('self-view');
+const svCanvas = document.getElementById('self-view-canvas');
+const svCtx = svCanvas.getContext('2d');
+const selfViewBtn = document.getElementById('self-view-btn');
+
+function updateSelfViewBtn() {
+  selfViewBtn.textContent = selfViewVisible ? 'Hide Self' : 'Self View';
+  selfViewBtn.style.color = selfViewVisible ? '#4fc3f7' : '#888';
+  selfViewEl.style.display = selfViewVisible ? 'block' : 'none';
+}
+updateSelfViewBtn();
+
+selfViewBtn.addEventListener('click', () => {
+  selfViewVisible = !selfViewVisible;
+  setSetting('selfView', selfViewVisible.toString());
+  updateSelfViewBtn();
+});
+
+function drawSelfView() {
+  if (!video.videoWidth) return;
+  const w = svCanvas.width, h = svCanvas.height;
+
+  // Draw mirrored video
+  svCtx.save();
+  svCtx.translate(w, 0);
+  svCtx.scale(-1, 1);
+  svCtx.drawImage(video, 0, 0, w, h);
+  svCtx.restore();
+
+  // Hand skeletons
+  for (let hi = 0; hi < 2; hi++) {
+    const hand = currentHands[hi];
+    if (!hand) continue;
+    const color = hi === 0 ? '#4fc3f7' : '#ff6dff';
+    svCtx.strokeStyle = color;
+    svCtx.fillStyle = color;
+    svCtx.lineWidth = 1.5;
+    svCtx.globalAlpha = 0.9;
+
+    for (const [a, b] of HAND_CONNECTIONS) {
+      svCtx.beginPath();
+      svCtx.moveTo((1 - hand[a].x) * w, hand[a].y * h);
+      svCtx.lineTo((1 - hand[b].x) * w, hand[b].y * h);
+      svCtx.stroke();
+    }
+    for (const lm of hand) {
+      svCtx.beginPath();
+      svCtx.arc((1 - lm.x) * w, lm.y * h, 2.5, 0, Math.PI * 2);
+      svCtx.fill();
+    }
+  }
+
+  // Face eye points
+  if (faceKeypoints) {
+    svCtx.fillStyle = '#ff6d00';
+    svCtx.globalAlpha = 0.9;
+    for (const kp of faceKeypoints) {
+      svCtx.beginPath();
+      svCtx.arc((1 - kp.x) * w, kp.y * h, 4, 0, Math.PI * 2);
+      svCtx.fill();
+    }
+  }
+
+  svCtx.globalAlpha = 1;
+}
 
 // ============================================================
 // Hand Tracking State (per hand)
@@ -487,6 +569,7 @@ const pinchThreshold = 0.05;
 function handleFaceResult(face) {
   if (!face) return;
   const kp = face.keypoints;
+  faceKeypoints = kp;
   const leftEye = kp[0], rightEye = kp[1];
   const now = performance.now();
 
@@ -897,6 +980,8 @@ function animate(timestamp) {
   gestureEl.textContent = gestures.join(' / ') || '--';
   gestureEl.className = 'val ' + (gestures.includes('PINCH') ? 'pinch' : 'open');
 
+  if (selfViewVisible) drawSelfView();
+
   renderer.render(scene, camera);
 }
 
@@ -1029,6 +1114,13 @@ async function startCamera() {
     });
     video.srcObject = stream;
     await video.play();
+
+    // Size self-view canvas to match actual video aspect ratio
+    if (video.videoWidth && video.videoHeight) {
+      const svW = 240;
+      svCanvas.width = svW;
+      svCanvas.height = Math.round(svW * video.videoHeight / video.videoWidth);
+    }
 
     statusEl.textContent = 'Loading ML models...';
 
