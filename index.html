@@ -185,6 +185,28 @@ const fillLight = new THREE.DirectionalLight(0x4488cc, 0.6);
 fillLight.position.set(-5, 2, 2);
 scene.add(fillLight);
 
+// Background grid for depth perception
+const bgGridZ = -25;
+const bgGridMat = new THREE.LineBasicMaterial({ color: 0x4fc3f7, opacity: 0.08, transparent: true });
+const bgGridGroup = new THREE.Group();
+const gridSpan = 20;
+const gridStep = 2;
+for (let i = -gridSpan; i <= gridSpan; i += gridStep) {
+  // Vertical lines
+  const vGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(i, -gridSpan, bgGridZ),
+    new THREE.Vector3(i, gridSpan, bgGridZ),
+  ]);
+  bgGridGroup.add(new THREE.Line(vGeo, bgGridMat));
+  // Horizontal lines
+  const hGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-gridSpan, i, bgGridZ),
+    new THREE.Vector3(gridSpan, i, bgGridZ),
+  ]);
+  bgGridGroup.add(new THREE.Line(hGeo, bgGridMat));
+}
+scene.add(bgGridGroup);
+
 // Grid of cubes (InstancedMesh for single draw call)
 const cubeGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
 const cubeMat = new THREE.MeshStandardMaterial({ roughness: 0.7, metalness: 0.3 });
