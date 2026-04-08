@@ -139,7 +139,7 @@ Under the passthrough mechanism (ghost relaxation rate = 0), each ghost channel 
 
 Multiple ghost fields injected at different spatial locations may merge without overwriting, clipping, or interfering. The blending is proportional and smooth, producing continuous gradients at the interface between different metadata values. This property eliminates the need for interface tracking, collision detection between metadata regions, or explicit blending logic. The streaming kernel performs the interpolation naturally.
 
-The ghost field may be characterized by standard fluid dynamics metrics including diffusion coefficient, center of mass trajectory, RMS spread radius, directional anisotropy, and conservation of total integrated value. These properties are deterministic and reproducible in integer arithmetic. The nine channels organize into four symmetry groups — one shear plane, three directional beams, three diagonal crosses, and two isotropic breaths — each with a distinct geometric personality derived from its eigenvector structure. Full per-channel transport characterization is in Appendix II.
+The ghost field may be characterized by standard fluid dynamics metrics including diffusion coefficient, center of mass trajectory, RMS spread radius, directional anisotropy, and conservation of total integrated value. These properties are deterministic and reproducible in integer arithmetic. The nine channels organize into four symmetry groups — one shear plane, three directional beams, three diagonal crosses, and two isotropic breaths — reflecting the irreducible representation structure of the cubic lattice's octahedral symmetry. The transport fingerprints of each group under free passthrough propagation, derived from the kernel equation and verified experimentally, are in Appendix II.
 
 Ghost mode channels support two distinct access modes that may be selected independently per channel and per use case.
 
@@ -833,7 +833,11 @@ No prior art is known for coupling multiple LBM simulation domains through ghost
 
 ## Appendix II. D3Q19 Ghost Channel Geometric Personalities
 
-The nine ghost channels in D3Q19 are not generic storage slots. Each channel is a resonant eigenmode of the lattice geometry, with a characteristic spatial spreading pattern determined entirely by its eigenvector structure via the transport kernel K[i] = W[i] * M[k][i]^2 / d_k. The channels organize naturally into four groups.
+The nine ghost channels in D3Q19 are not generic storage slots. Each channel is a resonant eigenmode of the lattice geometry, with a characteristic spatial spreading pattern determined entirely by its eigenvector structure via the transport kernel K[i] = W[i] * M[k][i]^2 / d_k. The channels organize into four groups.
+
+The 1 + 3 + 3 + 2 decomposition is the irreducible representation structure of the octahedral (Oh) point group symmetry of the cubic lattice. This structure is the basis on which MRT matrices are constructed and is documented in d'Humieres et al. (2002). The grouping itself is not a new contribution.
+
+What is new is threefold. First, the transport fingerprints — the specific diffusion rates, anisotropy ratios, kernel weights, and geometric personalities described below — are consequences of the kernel equation K[i] = W[i] * M[k][i]^2 / d_k, which was derived and experimentally verified as part of this disclosure. The symmetry structure was catalogued by the LBM community; the dynamics under free passthrough propagation were never measured or predicted. Second, the weight-orthogonal matrix construction used in this disclosure preserves the symmetry decomposition exactly in integer arithmetic, which the standard d'Humieres matrix does not. The grouping is theoretical in the standard construction and exact in this one. Third, no prior work characterized these symmetry classes as distinct transport channels matched to different data types, or recognized their use as a natural routing toolkit for encoded metadata.
 
 ### Group 1: Shear Plane (1 channel)
 
@@ -881,7 +885,7 @@ The nine channels organize by symmetry group:
 
     1 + 3 + 3 + 2 = 9
 
-This grouping is not assigned. It is the natural consequence of the MRT transformation matrix's eigenvector structure applied to D3Q19 lattice geometry. The physical intuition matches: the beams are the shear stress modes projected onto individual axes; the crosses are the off-diagonal stress modes; the breaths are the energy and energy-flux modes that have been re-orthogonalized under the weight inner product. The lattice had this structure for 30 years. The ghost channels are its unused harmonics.
+The grouping reflects the cubic lattice's own symmetry structure. The physical intuition matches: the beams are the shear stress modes projected onto individual axes; the crosses are the off-diagonal stress modes; the breaths are the energy and energy-flux modes re-orthogonalized under the weight inner product. The LBM community built this structure into their matrices and then damped it. The transport fingerprints below are what happens when you stop damping and start listening.
 
 ---
 
