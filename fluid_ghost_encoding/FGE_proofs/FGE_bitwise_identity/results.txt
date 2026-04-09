@@ -1,0 +1,24 @@
+GHOST VS NO-GHOST: BITWISE IDENTITY PROOF (u32, 5,000 ticks)
+RHO=2^32, Ghost=2^26 (9.38% of rest distribution)
+Analytical ux_max = 353.6/10000
+
+            WITH ghost      NO ghost    Difference
+  ux_max           359           359            +0
+  vs ana       101.52%       101.52%
+
+    y     ghost  no ghost    diff
+    0         0         0      +0
+    1        80        80      +0
+    2       202       202      +0
+    3       289       289      +0
+    4       342       342      +0
+    5       359       359      +0
+    6       342       342      +0
+    7       289       289      +0
+    8       202       202      +0
+    9        80        80      +0
+   10         0         0      +0
+
+Ghost conservation: 67108898 / 67108864 = 100.000051%
+Total absolute velocity difference: 0/10000
+Ghost effect on physics: ZERO - bitwise identical

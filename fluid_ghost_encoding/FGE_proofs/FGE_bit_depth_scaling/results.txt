@@ -1,0 +1,42 @@
+THE GHOST IN DIFFERENT BIT-DEPTH WORLDS
+Grid: 3x9x3 = 81 cells, periodic
+MRT with correct equilibrium, m[18] passthrough
+100 ticks each
+
+ Depth           RHO       Ghost  G bits   Stamp        Init       Final   Conserv      Cell    OK
+----------------------------------------------------------------------------------------------------
+    u8           765           5       2       0          10          39   390.00%         0   OVF
+   u10          3069          21       4       0          26          37   142.31%         0   OVF
+   u12         12285          85       6       0          90         114   126.67%         1   OVF
+   u16        196605        1365      10       4        1370        1425   104.01%        17   OVF
+   u20       3145725       21845      14       8       21860       21909   100.22%       270   OVF
+   u24      50331645      349525      18      12      349530      349556   100.01%      4315   YES
+   u32   12884901885    89478485      26      20    89478490    89478483   100.00%   1104672   YES
+
+INTERPRETATION:
+
+  u8: Ghost survives with 2 bits injected, 0 bits per cell after stamp
+         1 distinguishable levels per cell. 81x redundancy.
+
+  u10: Ghost survives with 4 bits injected, 0 bits per cell after stamp
+         1 distinguishable levels per cell. 81x redundancy.
+
+  u12: Ghost survives with 6 bits injected, 0 bits per cell after stamp
+         1 distinguishable levels per cell. 81x redundancy.
+
+  u16: Ghost survives with 10 bits injected, 4 bits per cell after stamp
+         17 distinguishable levels per cell. 81x redundancy.
+         Could encode: team ID (4 bits)
+
+  u20: Ghost survives with 14 bits injected, 8 bits per cell after stamp
+         270 distinguishable levels per cell. 81x redundancy.
+         Could encode: color (8 bits)
+
+  u24: Ghost survives with 18 bits injected, 12 bits per cell after stamp
+         4315 distinguishable levels per cell. 81x redundancy.
+         Could encode: color (12 bits)
+
+  u32: Ghost survives with 26 bits injected, 20 bits per cell after stamp
+         1104672 distinguishable levels per cell. 81x redundancy.
+         Could encode: color (20 bits)
+

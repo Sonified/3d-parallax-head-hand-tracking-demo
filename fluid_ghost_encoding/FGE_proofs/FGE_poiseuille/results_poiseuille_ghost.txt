@@ -1,0 +1,23 @@
+POISEUILLE FLOW + GHOST PASSTHROUGH (5,000 ticks)
+Matrix: Fakhari et al. 2017, weight-orthogonal D3Q19 MRT
+Grid: 11 cells (y=0,10 walls), integer arithmetic throughout
+
+  y= 0:      0    WALL
+  y= 1:     86  ###########  
+  y= 2:    217  ############################  
+  y= 3:    311  ########################################  
+  y= 4:    367  ###############################################  
+  y= 5:    386  #################################################  
+  y= 6:    367  ###############################################  
+  y= 7:    311  ########################################  
+  y= 8:    217  ############################  
+  y= 9:     86  ###########  
+  y=10:      0    WALL
+
+ux_max measured:    386/10000 = 0.038600 lu
+ux_max analytical:  379.7/10000 = 0.037969 lu
+Ratio:              1.0166  (1.7% error)
+q/(c*W):            0.6759  (continuous: 0.6667, discrete LBM: ~0.75)
+Ghost conservation: 262186/262144 = 100.016%
+
+RESULT: Correct Poiseuille flow. Ghost survives. OQ-5 closed.

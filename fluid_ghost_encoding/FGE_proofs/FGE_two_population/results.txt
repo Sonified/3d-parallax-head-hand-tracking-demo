@@ -1,0 +1,26 @@
+TWO POPULATIONS: 128x128 ISOLATION TEST
+======================================================================
+Grid: 128x128x1 = 16,384 cells, periodic, no body force
+A = 50,000 on left half (x<64)
+B = 5,000,000 on right half (x>=64)
+B/A = 100x separation
+Diffusion timescale ~ 21,845 ticks
+
+  t=    0: A_avg=    50000 B_avg=  5000000 contrast= 0.9802 class=128/128 conserv=100.000% [  0.0s]
+          x-profile: |AAAAAAAAAAAAAAAABBBBBBBBBBBBBBBB|
+  t=  120: A_avg=   653017 B_avg=  4396982 contrast= 0.7414 class=128/128 conserv=100.000% [  3.0s]
+          x-profile: |=aaAAAAAAAAAAAa==bbBBBBBBBBBBBb=|
+  t=  240: A_avg=   903947 B_avg=  4146051 contrast= 0.6420 class=128/128 conserv=100.000% [  5.8s]
+          x-profile: |==aaAAAAAAAAAaa===bbBBBBBBBBBbb=|
+  t=  480: A_avg=  1257616 B_avg=  3792382 contrast= 0.5019 class=128/128 conserv=100.000% [ 11.5s]
+          x-profile: |==aaaaAAAAAaaa====bbbbBBBBBbbb==|
+  t=  960: A_avg=  1729200 B_avg=  3320799 contrast= 0.3152 class=128/128 conserv=100.000% [ 23.3s]
+          x-profile: |====aaaaaaaaa=======bbbbbbbbb===|
+  t= 1920: A_avg=  2209577 B_avg=  2840423 contrast= 0.1249 class=128/128 conserv=100.000% [ 47.8s]
+          x-profile: |================================|
+  t= 3840: A_avg=  2475437 B_avg=  2574563 contrast= 0.0196 class=128/128 conserv=100.000% [ 95.7s]
+          x-profile: |================================|
+
+KEY FINDING: 128/128 columns correctly classified at every checkpoint.
+The gradient direction -- not magnitude contrast -- is the information carrier.
+The diffusion front softens monotonically but never reverses direction.

@@ -1,0 +1,19 @@
+FGE NOISE FLOOR SWEEP
+======================================================================
+5x5x5 periodic, RHO=10^9, force=10^5, 100 ticks each
+
+ Ghost Value  Per-cell  Max vel diff   Ghost conserv    Status
+-----------------------------------------------------------------
+           0         0           0/1000   N/A (control)   control
+           1         0           3/1000      3000.0000%      DEAD
+          10         0           3/1000       -20.0000%      DEAD
+         100         0           3/1000        89.0000%      DEAD
+        1000         8           3/1000       101.7000%     ROUGH
+       10000        80           3/1000       100.2700%     GREAT
+      100000       800           3/1000        99.9910%  EXCELLENT
+      500000      4000           3/1000        99.9966%  EXCELLENT
+     1000000      8000           3/1000       100.0055%  EXCELLENT
+
+KEY FINDING: velocity deviation is CONSTANT (3/1000) regardless of ghost magnitude.
+Survival governed by per-cell share exceeding rounding noise floor (~16), not alignment.
+Operational envelope: floor = ~10,000 injection, ceiling = RHO/144 = 6,944,444
