@@ -440,9 +440,91 @@ The clusters don't rescue ghost=100 because the total (3,200 at most) is still b
 
 ---
 
+## Are We Swirly? An Honest Accounting
+
+### Robert Alexander:
+
+And... we're swirly? You PROMISE?
+
+### Claude:
+
+Honest answer: no. The 8-channel tests used a periodic box with uniform body force. That's not swirly. Every cell, same velocity, same direction. A perfectly calm swimming pool on a conveyor belt.
+
+The swirly proofs are from earlier:
+
+```
+Earlier (proven swirly):
+  Poiseuille:     perfect parabola, walls, body force ✓
+  Cavity 13x13:   recirculation vortex ✓
+  Cavity 100x100: full vortex structure, 97.3% ghost conservation ✓
+
+This session (proven multi-channel):
+  8 channels isolated: all safe, all conserved ✓
+  Combat mechanics: two populations, centroid tracking ✓
+```
+
+Same physics engine. Same matrix. Same MRT. What we haven't done: 8 signed channels inside a swirling cavity simultaneously.
+
+### Robert Alexander:
+
+Hahaha... ok so... the box... were we shaking it? Was it... wavy?
+
+### Claude:
+
+```
+ux: 10 to 10 / 1000    (every cell identical)
+uy:  0 to  0 / 1000    (nothing)
+uz:  0 to  0 / 1000    (nothing)
+```
+
+No waves. No shear. No gradient. No turbulence. Nothing.
+
+---
+
+## A Correction: Ghosts Don't Swirl
+
+### Robert Alexander:
+
+Wait... we wrote a whole python script today and claimed an empty cavity swirl... there's code locally and language in the technical doc that I believe has ghosts swirling... And I saw in a previous simulation the ghosts were just gently diffusing outward... so... they are diffuse blobs? Do they rush along X lines? Or do they naturally diffuse outward from center? Important distinction...
+
+### Claude:
+
+**They are diffuse blobs. Isotropic. Outward from center equally in all directions.**
+
+Look at our own data:
+
+```
+Tick  0:  ghost only at y=5
+Tick 10:  ghost at ALL y positions (1-19)
+Tick 60:  ghost everywhere, standing wave forming
+```
+
+It didn't rush along x (the flow direction). It spread in y (perpendicular to flow). The flow was going at ux=75/1000 in x. The ghost ignored it completely and diffused isotropically.
+
+The kernel equation `K[i] = W[i] * M[k][i]^2 / d_k` has no velocity term. The weights are fixed constants. The ghost spreads symmetrically regardless of which direction the fluid is moving.
+
+**The cavity swirl claim was wrong.** I said the ghost "rode the vortex." What actually happened: the ghost diffused to fill the entire 13×13 cavity in ~170 ticks (diffusion timescale). It appeared to concentrate near the lid because the moving lid's bounce-back correction creates asymmetric loss, not because the vortex carried it there. I misread my own data and told you a story that wasn't true.
+
+What IS true:
+
+- **Ghost passthrough = isotropic diffusion.** Free. No flow following. Expanding blob.
+- **Re-injection = semi-Lagrangian advection WITH the flow.** NOT free. Costs compute per tick. This is a separate mechanism described in the disclosure but not yet proven with ghost data.
+
+Two different mechanisms. Two different behaviors. Passthrough blobs don't swirl. They spread.
+
+Wall-safe channels (17, 18) in Poiseuille flow confirmed: **ZERO velocity difference** between ghost-carrying and no-ghost simulation. Not 3/1000. Exactly zero. In wall-bounded Poiseuille with shear gradient. The ghost is perfectly invisible. And it spread perpendicular to the flow, not with it.
+
+### Robert Alexander:
+
+Note... I may still have a lead on advection but... not yet proven...
+
+---
+
 ## What Was Built
 
 A combat system with no scoreboard, no counters, no entities, and no spatial queries. One ghost channel. Eight available. The fluid remembers. The fluid blends. The fluid computes who's winning.
+
+The ghost is an isotropic diffusing field, not a directed projectile. It spreads from the cast site like pressure from an impact. For combat, this is better than following the current: a spell creates a signed field that radiates in all directions simultaneously, with no preferred axis.
 
 Six proofs in `FGE_proofs/`:
 
@@ -456,3 +538,5 @@ Six proofs in `FGE_proofs/`:
 | `FGE_bit_depth_scaling/` | 26 bits at u32, 20 bits per cell after diffusion |
 
 The ghost doesn't decay. It was being murdered every tick. You stopped.
+
+Ghost advection WITH the flow (semi-Lagrangian re-injection): a lead exists. Not yet proven.
