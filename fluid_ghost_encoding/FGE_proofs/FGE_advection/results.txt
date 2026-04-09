@@ -1,0 +1,35 @@
+Equilibrating Poiseuille flow (800 ticks)...
+ux_center (y=5): 395/10000 = 0.0395 cells/tick
+Analytical ux_max:    379.7/10000
+
+Ghost injected: 250000000 at (4,5) in m[17]
+Expected drift per tick: 0.0395 cells
+Expected drift in 100 ticks: 3.95 cells
+
+ Tick |  Centroid X |  Expected X |    Error |   Conserved
+----------------------------------------------------------
+    0 |       4.000 |       4.000 |   -0.000 |    99.9998%
+   10 |       4.395 |       4.395 |   -0.000 |    99.9991%
+   20 |       4.790 |       4.790 |   -0.000 |    99.9984%
+   30 |       5.185 |       5.185 |   -0.000 |    99.9976%
+   40 |       5.580 |       5.580 |   -0.000 |    99.9968%
+   50 |       5.974 |       5.975 |   -0.001 |    99.9959%
+   60 |       6.369 |       6.370 |   -0.001 |    99.9951%
+   70 |       6.764 |       6.765 |   -0.001 |    99.9943%
+   80 |       7.159 |       7.160 |   -0.001 |    99.9935%
+   90 |       7.554 |       7.555 |   -0.001 |    99.9928%
+  100 |       7.949 |       7.950 |   -0.001 |    99.9919%
+
+=======================================================
+SUMMARY
+  Actual drift   : 3.949 cells in 100 ticks
+  Expected drift : 3.950 cells (ux_center * 100)
+  Accuracy       : 100.0% of expected
+  Channels used  : m[17] / m[18] (both wall-safe symmetric)
+  External buffer: none (channels serve as double buffer)
+
+Final ghost mass  : 249979754
+Initial ghost mass: 250000000
+Conservation      : 99.9919%
+
+Ghost drifted with Poiseuille flow. Breath ping-pong advection: VERIFIED.

@@ -12,6 +12,7 @@ Experimental validation for the Fluid Ghost Encoding patent disclosure (`FGE-TEC
 | [FGE_noise_floor](FGE_noise_floor/) | Integer rounding defines a per-cell noise floor (~16 counts). Velocity deviation constant at 3/1000 regardless of ghost magnitude. Operational envelope: floor=ghost/cells>16, ceiling=RHO/144. | I.K |
 | [FGE_two_population](FGE_two_population/) | Two ghost populations in 128x128 domain. 128/128 correct classification for 32 seconds. Gradient direction is the information carrier. | I.L, I.M |
 | [FGE_bit_depth_scaling](FGE_bit_depth_scaling/) | Ghost capacity scales with integer word size. At u32: 26 bits. After spreading to V cells: 26 - log2(V) bits per cell. | I.A, I.K |
+| [FGE_advection](FGE_advection/) | Ghost centroid follows Poiseuille flow at 100.0% accuracy using m[17]/m[18] ping-pong. 99.99% conservation. No external buffer. | I.A, I.N |
 
 ## Running the proofs
 
@@ -34,5 +35,6 @@ The two_population test runs for approximately 2.5 minutes on a modern laptop (1
 4. **Operational envelope** (FGE_noise_floor): floor and ceiling bounds, no guards needed within
 5. **Populations isolate** (FGE_two_population): 32-second classification lifetime, gradient as carrier
 6. **Scales with precision** (FGE_bit_depth_scaling): 26 bits at u32, predictable scaling formula
+7. **Directed advection** (FGE_advection): centroid follows flow at 100.0% accuracy via breath ping-pong; re-injection is explicit, not free
 
 Each proof is independent and reproducible. Together they form the evidentiary basis for the FGE provisional patent filing.
