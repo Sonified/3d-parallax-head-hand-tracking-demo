@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>u10 TRT Fluid Sweep</title>
+<style>
+body{background:#0a0a1a;color:#ccc;font-family:'SF Mono',monospace;padding:20px;font-size:12px}
+pre{background:#111;padding:12px;border-radius:6px;overflow-x:auto;line-height:1.4;max-height:500px;overflow-y:auto}
+.pass{color:#4fc3f7}.fail{color:#f44}.gold{color:#ffd700}.dim{color:#666}.warn{color:#fa0}
+h2{color:#4fc3f7;margin-bottom:4px}
+canvas{border:1px solid #333;display:block;margin-top:10px;image-rendering:pixelated}
+</style>
+</head><body>
+<h2>u10 TRT D3Q19 Sandbox — vectorized + LUT</h2>
+<pre id="log">Initializing WebGPU...</pre>
+<canvas id="vis" width="640" height="320"></canvas>
+<script type="module">
+const log = document.getElementById('log');
+const print = (s, cls) => { const span = document.createElement('span'); span.className = cls||''; span.textContent = s+'\n'; log.appendChild(span); };
+log.textContent = '';
+
+// ── D3Q19 lattice ───────────────────────────────────────────────────────────
+const EX = [0, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1, 1,-1, 1,-1, 0, 0, 0, 0];
+const EY = [0, 0, 0, 1,-1, 0, 0, 1, 1,-1,-1, 0, 0, 0, 0, 1,-1, 1,-1];
+const EZ = [0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1, 1,-1,-1, 1, 1,-1,-1];
+const W36 = [12, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+const OPP = [0, 2, 1, 4, 3, 6, 5,10, 9, 8, 7,14,13,12,11,18,17,16,15];
+
+// ── LUT generators ──────────────────────────────────────────────────────────
+// LUT_SIZE entries map "raw velocity index" (0..LUT_SIZE-1) to "clamped output"
+// Input domain: [-LUT_RANGE, +LUT_RANGE] in SCALE units
+// Output: linear identity for |input| < UMAX, smooth saturation at UMAX, hard cap.
+const LUT_SIZE = 256;
+const LUT_RANGE = 32;  // raw velocity domain in SCALE units
+
+// Each curve takes (raw_input, umax) and returns the mapped output (both in SCALE units).
+// The KEY property: small inputs pass through unchanged. Only large inputs get squashed.
+const CURVES = {
+    linear:    (x, umax) => Math.max(-umax, Math.min(umax, x)),                    // hard clamp
+    tanh:      (x, umax) => umax * Math.tanh(x / umax),                            // smooth saturation
+    tanh_hard: (x, umax) => umax * Math.tanh(x / (umax * 0.7)),                    // tighter knee
+    soft_knee: (x, umax) => {
+        // Identity until |x| > umax*0.7, then smooth knee to umax
+        const a = Math.abs(x), s = Math.sign(x);
+        const knee = umax * 0.7;
+        if (a < knee) return x;
+        // Smooth interp from knee to umax over (umax - knee) * 3 input range
+        const t = (a - knee) / Math.max(1, (umax - knee) * 3);
+        return s * (knee + (umax - knee) * Math.tanh(t));
+    },
+    cubic:     (x, umax) => {
+        // Cubic soft clip: y = x - x^3/3, scaled
+        const n = Math.max(-1.5, Math.min(1.5, x / umax));
+        return umax * (n - n*n*n/3) / (1 - 1/3);
+    },
+    sigmoid:   (x, umax) => umax * (2 / (1 + Math.exp(-2 * x / umax)) - 1),
+};
+
+function buildLUT(curveName, umaxSCALE) {
+    const lut = new Int32Array(LUT_SIZE);
+    const curve = CURVES[curveName];
+    const half = LUT_SIZE / 2;
+    for (let i = 0; i < LUT_SIZE; i++) {
+        // Map index 0..LUT_SIZE-1 to raw input value in SCALE units
+        const x = (i - half) * LUT_RANGE / half;  // -LUT_RANGE to +LUT_RANGE
+        lut[i] = Math.round(curve(x, umaxSCALE));
+    }
+    return lut;
+}
+
+// ── WebGPU setup ────────────────────────────────────────────────────────────
+async function init() {
+    const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error('No WebGPU adapter');
+    const device = await adapter.requestDevice({
+        requiredLimits: {
+            maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+            maxBufferSize: adapter.limits.maxBufferSize,
+            maxComputeInvocationsPerWorkgroup: adapter.limits.maxComputeInvocationsPerWorkgroup,
+        }
+    });
+    return { adapter, device };
+}
+
+// ── Shader: vectorized, vec3 for u/j, LUT lookup, single-pass collide+stream ─
+const SHADER = `
+struct Params {
+    NX: i32, NY: i32, NZ: i32, _pad0: i32,
+    RHO: i32, SCALE: i32, ON1: i32, OD1: i32,
+    ON2: i32, OD2: i32, FORCE: i32, TICK: i32,
+    INJECT_X: i32, INJECT_TICKS: i32, MODE: i32, LUT_MODE: i32,
+};
+
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read>       fIn:  array<i32>;
+@group(0) @binding(2) var<storage, read_write> fOut: array<i32>;
+@group(0) @binding(3) var<storage, read>       LUT:  array<i32>;  // 256-entry signed LUT
+
+const EX = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1, 1,-1, 1,-1, 0, 0, 0, 0);
+const EY = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1, 1,-1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+const EZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1, 1,-1,-1, 1, 1,-1,-1);
+const W36 = array<i32, 19>(12, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1);
+const OPP = array<i32, 19>(0, 2, 1, 4, 3, 6, 5,10, 9, 8, 7,14,13,12,11,18,17,16,15);
+
+const LUT_SIZE: i32 = 256;
+const LUT_RANGE: i32 = 32;  // raw velocity domain
+
+fn idx3(x: i32, y: i32, z: i32) -> i32 {
+    return x + y * P.NX + z * P.NX * P.NY;
+}
+
+// Per-component LUT lookup: map raw SCALE-unit velocity through table
+fn lut1(v: i32) -> i32 {
+    // Map v in [-LUT_RANGE, LUT_RANGE] to index [0, LUT_SIZE)
+    let half = LUT_SIZE / 2;
+    var i = v * half / LUT_RANGE + half;
+    if (i < 0) { i = 0; }
+    if (i >= LUT_SIZE) { i = LUT_SIZE - 1; }
+    return LUT[i];
+}
+
+// Magnitude-based LUT: clamp by speed, preserve direction
+fn lut_mag(u: vec3<i32>) -> vec3<i32> {
+    let mag2 = u.x * u.x + u.y * u.y + u.z * u.z;
+    if (mag2 == 0) { return u; }
+    // Approximate magnitude via sqrt (integer Newton-Raphson would be better, but f32 here is fine)
+    let mag = i32(sqrt(f32(mag2)));
+    let new_mag = lut1(mag);
+    // Scale each component by new_mag/mag (integer math)
+    return vec3<i32>(
+        u.x * new_mag / max(mag, 1),
+        u.y * new_mag / max(mag, 1),
+        u.z * new_mag / max(mag, 1)
+    );
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let cellIdx = i32(gid.x);
+    let total = P.NX * P.NY * P.NZ;
+    if (cellIdx >= total) { return; }
+
+    let z = cellIdx / (P.NX * P.NY);
+    let y = (cellIdx / P.NX) % P.NY;
+    let x = cellIdx % P.NX;
+
+    // Walls: just propagate (no collision, no force)
+    if (y == 0 || y == P.NY - 1) {
+        for (var q = 0; q < 19; q++) {
+            fOut[q * total + cellIdx] = fIn[q * total + cellIdx];
+        }
+        return;
+    }
+
+    // ── GATHER STREAMING: read each direction from upstream neighbor ──
+    // f[q] = post-collision value at source cell from previous tick
+    var f: array<i32, 19>;
+    for (var q = 0; q < 19; q++) {
+        let sx = (x - EX[q] + P.NX) % P.NX;
+        let sy = y - EY[q];
+        let sz = (z - EZ[q] + P.NZ) % P.NZ;
+        if (sy <= 0 || sy >= P.NY - 1) {
+            // Source is wall (or below y=1 or above y=NY-2): halfway bounce-back
+            // The f[q] streaming TO us from a wall reflects the OPP[q] we sent INTO it
+            f[q] = fIn[OPP[q] * total + cellIdx];
+        } else {
+            let srcIdx = idx3(sx, sy, sz);
+            f[q] = fIn[q * total + srcIdx];
+        }
+    }
+
+    // Macroscopic
+    var rho: i32 = 0;
+    var j = vec3<i32>(0, 0, 0);
+    for (var q = 0; q < 19; q++) {
+        rho = rho + f[q];
+        j.x = j.x + EX[q] * f[q];
+        j.y = j.y + EY[q] * f[q];
+        j.z = j.z + EZ[q] * f[q];
+    }
+
+    // Apply force
+    if (P.MODE == 0) {
+        // Poiseuille body force
+        j.x = j.x + P.FORCE;
+    } else {
+        // Spell injection
+        if (P.TICK <= P.INJECT_TICKS && x == P.INJECT_X && abs(y - P.NY/2) <= 2) {
+            j.x = j.x + P.FORCE;
+        }
+    }
+
+    // Compute velocity in SCALE units
+    var u = vec3<i32>(
+        j.x * P.SCALE / rho,
+        j.y * P.SCALE / rho,
+        j.z * P.SCALE / rho
+    );
+
+    // ── Apply LUT ──
+    if (P.LUT_MODE == 1) {
+        // Per-component LUT
+        u = vec3<i32>(lut1(u.x), lut1(u.y), lut1(u.z));
+    } else if (P.LUT_MODE == 2) {
+        // Magnitude LUT
+        u = lut_mag(u);
+    } else if (P.LUT_MODE == 3) {
+        // Both: per-component first, then magnitude
+        u = vec3<i32>(lut1(u.x), lut1(u.y), lut1(u.z));
+        u = lut_mag(u);
+    }
+    // LUT_MODE 0 = no LUT (raw)
+
+    let usq = u.x*u.x + u.y*u.y + u.z*u.z;
+
+    // Equilibrium with split quadratic (i32-safe)
+    var feq: array<i32, 19>;
+    var feqSum: i32 = 0;
+    for (var q = 1; q < 19; q++) {
+        let cu = EX[q]*u.x + EY[q]*u.y + EZ[q]*u.z;
+        let base = W36[q] * rho / 36;
+        let linear = W36[q] * rho * 3 * cu / (36 * P.SCALE);
+        let quad = linear * 3 * cu / (2 * P.SCALE);
+        let usq_c = W36[q] * rho * 3 / 72;
+        let usq_t = usq_c * usq / (P.SCALE * P.SCALE);
+        feq[q] = base + linear + quad - usq_t;
+        feqSum = feqSum + feq[q];
+    }
+    feq[0] = rho - feqSum;
+
+    // TRT collision
+    var fc: array<i32, 19>;
+    fc[0] = feq[0] + (P.OD1 - P.ON1) * (f[0] - feq[0]) / P.OD1;
+    let pairs_a = array<i32, 9>(1, 3, 5, 7, 8, 11, 12, 15, 16);
+    let pairs_b = array<i32, 9>(2, 4, 6, 10, 9, 14, 13, 18, 17);
+    for (var p = 0; p < 9; p++) {
+        let a = pairs_a[p]; let b = pairs_b[p];
+        let fneq_p = (f[a] - feq[a] + f[b] - feq[b]) / 2;
+        let fneq_m = (f[a] - feq[a] - f[b] + feq[b]) / 2;
+        let sym  = (P.OD1 - P.ON1) * fneq_p / P.OD1;
+        let asym = (P.OD2 - P.ON2) * fneq_m / P.OD2;
+        fc[a] = feq[a] + sym + asym;
+        fc[b] = feq[b] + sym - asym;
+    }
+    // Mass conservation
+    var fcSum: i32 = 0;
+    for (var q = 1; q < 19; q++) { fcSum = fcSum + fc[q]; }
+    fc[0] = rho - fcSum;
+
+    // Write post-collision result. Streaming was already done at the gather step above.
+    for (var q = 0; q < 19; q++) {
+        fOut[q * total + cellIdx] = fc[q];
+    }
+}
+`;
+
+// ── Run a single config ─────────────────────────────────────────────────────
+async function runConfig(device, pipeline, cfg) {
+    const { NX, NY, NZ, RHO, SCALE, ON1, OD1, ON2, OD2, FORCE, TICKS, MODE, INJECT_X, INJECT_TICKS, LUT_MODE, LUT_CURVE, UMAX } = cfg;
+    const N = NX * NY * NZ;
+    const fSize = 19 * N * 4;
+
+    // Init buffers
+    const fA = device.createBuffer({size: fSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+    const fB = device.createBuffer({size: fSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+
+    const init = new Int32Array(19 * N);
+    let restVal = RHO;
+    for (let q = 1; q < 19; q++) {
+        const v = Math.floor(W36[q] * RHO / 36);
+        for (let i = 0; i < N; i++) init[q*N + i] = v;
+        restVal -= v;
+    }
+    for (let i = 0; i < N; i++) init[i] = restVal;
+    device.queue.writeBuffer(fA, 0, init);
+
+    // Build LUT
+    const lut = buildLUT(LUT_CURVE, UMAX);
+    const lutBuf = device.createBuffer({size: LUT_SIZE * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(lutBuf, 0, lut);
+
+    // Params buffer
+    const paramsBuf = device.createBuffer({size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
+
+    function writeParams(tick) {
+        const arr = new Int32Array([
+            NX, NY, NZ, 0,
+            RHO, SCALE, ON1, OD1,
+            ON2, OD2, FORCE, tick,
+            INJECT_X, INJECT_TICKS, MODE === 'spell' ? 1 : 0, LUT_MODE
+        ]);
+        device.queue.writeBuffer(paramsBuf, 0, arr);
+    }
+
+    function makeBindGroup(fSrc, fDst) {
+        return device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: paramsBuf } },
+                { binding: 1, resource: { buffer: fSrc } },
+                { binding: 2, resource: { buffer: fDst } },
+                { binding: 3, resource: { buffer: lutBuf } },
+            ]
+        });
+    }
+
+    const wgCount = Math.ceil(N / 64);
+    let src = fA, dst = fB;
+    const t0 = performance.now();
+
+    for (let tick = 1; tick <= TICKS; tick++) {
+        writeParams(tick);
+        const bg = makeBindGroup(src, dst);
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(wgCount);
+        pass.end();
+        device.queue.submit([enc.finish()]);
+        [src, dst] = [dst, src];
+    }
+    await device.queue.onSubmittedWorkDone();
+    const t1 = performance.now();
+
+    // Readback
+    const readBuf = device.createBuffer({ size: fSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(src, 0, readBuf, 0, fSize);
+    device.queue.submit([enc.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    const data = new Int32Array(readBuf.getMappedRange().slice(0));
+    readBuf.unmap();
+
+    // Cleanup
+    fA.destroy(); fB.destroy(); lutBuf.destroy(); paramsBuf.destroy(); readBuf.destroy();
+
+    // Compute profile
+    const profile = new Float64Array(NY);
+    for (let y = 0; y < NY; y++) {
+        let sumUx = 0, count = 0;
+        for (let z = 0; z < NZ; z++) {
+            for (let x = 0; x < NX; x++) {
+                const cellIdx = x + y * NX + z * NX * NY;
+                let rho = 0, jx = 0;
+                for (let q = 0; q < 19; q++) {
+                    const v = data[q * N + cellIdx];
+                    rho += v;
+                    jx += EX[q] * v;
+                }
+                if (rho > 0) {
+                    sumUx += (jx * SCALE) / rho;
+                    count++;
+                }
+            }
+        }
+        profile[y] = count > 0 ? sumUx / count / SCALE : 0;
+    }
+
+    // Stats
+    let fmin = data[0], fmax = data[0];
+    for (let i = 0; i < data.length; i++) {
+        if (data[i] < fmin) fmin = data[i];
+        if (data[i] > fmax) fmax = data[i];
+    }
+    let totalMass = 0;
+    for (let i = 0; i < data.length; i++) totalMass += data[i];
+    const expectedMass = RHO * N;
+    const massDrift = ((totalMass - expectedMass) / expectedMass) * 100;
+    let uMax = 0;
+    for (let y = 1; y < NY-1; y++) {
+        if (Math.abs(profile[y]) > Math.abs(uMax)) uMax = profile[y];
+    }
+    // Parabola score: how much center > edges? higher = more parabolic
+    const interior = profile.slice(1, NY-1);
+    const mid = Math.floor(interior.length / 2);
+    const center = (interior[mid] + interior[mid-1] + interior[mid+1] || 0) / 3;
+    const edge = (interior[0] + interior[interior.length-1]) / 2;
+    const parabola_score = edge !== 0 ? center / Math.max(Math.abs(edge), 1e-6) : 0;
+    const u10ok = fmin >= 0 && fmax <= 1023;
+
+    return {
+        cfg, uMax, fmin, fmax, u10ok, massDrift,
+        profile: Array.from(profile),
+        msPerTick: (t1-t0)/TICKS,
+        parabola_score,
+        // raw_data: only return on demand to keep RESULT lines small
+    };
+}
+
+// ── Main entry: read configs from URL or use default ────────────────────────
+async function main() {
+    const params = new URLSearchParams(location.search);
+    let configs;
+
+    if (params.has('configs')) {
+        configs = JSON.parse(decodeURIComponent(params.get('configs')));
+    } else {
+        // Default single config for visual debugging
+        configs = [{
+            NX: 64, NY: 32, NZ: 4,
+            RHO: 1008, SCALE: 32,
+            ON1: 10, OD1: 7, ON2: 8, OD2: 5,
+            FORCE: 32, TICKS: 2000,
+            MODE: 'poiseuille',
+            INJECT_X: 6, INJECT_TICKS: 100,
+            LUT_MODE: 1, LUT_CURVE: 'tanh', UMAX: 5,
+        }];
+    }
+
+    print(`Configs: ${configs.length}`);
+    const { device } = await init();
+    print(`GPU: ${(await navigator.gpu.requestAdapter()).info?.description || '?'}`);
+
+    const module = device.createShaderModule({ code: SHADER });
+    const info = await module.getCompilationInfo();
+    let hasError = false;
+    for (const msg of info.messages) {
+        if (msg.type === 'error') { print(`SHADER ERROR line ${msg.lineNum}: ${msg.message}`, 'fail'); hasError = true; }
+        else if (msg.type === 'warning') { print(`warn line ${msg.lineNum}: ${msg.message}`, 'warn'); }
+    }
+    if (hasError) { print('FATAL', 'fail'); print('Done.'); return; }
+
+    const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    print('Pipeline ready');
+
+    const allResults = [];
+    for (let i = 0; i < configs.length; i++) {
+        const cfg = configs[i];
+        try {
+            const result = await runConfig(device, pipeline, cfg);
+            allResults.push(result);
+            console.log('RESULT:' + JSON.stringify(result));
+            print(`[${i+1}/${configs.length}] u_max=${result.uMax.toFixed(4)} parabola=${result.parabola_score.toFixed(2)} u10=${result.u10ok?'Y':'N'} mass=${result.massDrift.toFixed(4)}% ${result.msPerTick.toFixed(2)}ms/t`);
+        } catch (e) {
+            print(`[${i+1}] ERROR: ${e.message}`, 'fail');
+            console.log('RESULT:' + JSON.stringify({ cfg, error: e.message }));
+        }
+    }
+
+    print('');
+    print(`Done. ${allResults.length}/${configs.length} succeeded.`, 'gold');
+
+    // Visualize last config
+    if (allResults.length > 0) {
+        const last = allResults[allResults.length - 1];
+        visualize(last);
+    }
+}
+
+function visualize(result) {
+    const canvas = document.getElementById('vis');
+    const ctx = canvas.getContext('2d');
+    const NY = result.cfg.NY;
+    const profile = result.profile;
+
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Plot profile as parabola
+    const margin = 40;
+    const w = canvas.width - margin*2;
+    const h = canvas.height - margin*2;
+    let umax = 0;
+    for (const v of profile) if (Math.abs(v) > umax) umax = Math.abs(v);
+    if (umax === 0) umax = 0.01;
+
+    ctx.strokeStyle = '#4fc3f7';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let y = 0; y < NY; y++) {
+        const px = margin + (profile[y] / umax) * w * 0.45 + w/2;
+        const py = margin + (1 - y / (NY-1)) * h;
+        if (y === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Points
+    ctx.fillStyle = '#ffd700';
+    for (let y = 0; y < NY; y++) {
+        const px = margin + (profile[y] / umax) * w * 0.45 + w/2;
+        const py = margin + (1 - y / (NY-1)) * h;
+        ctx.beginPath();
+        ctx.arc(px, py, 4, 0, Math.PI*2);
+        ctx.fill();
+    }
+
+    // Center axis
+    ctx.strokeStyle = '#444';
+    ctx.beginPath();
+    ctx.moveTo(margin + w/2, margin);
+    ctx.lineTo(margin + w/2, margin + h);
+    ctx.stroke();
+}
+
+main().catch(e => { print('FATAL: ' + e.message + '\n' + e.stack, 'fail'); print('Done.'); });
+</script>
+</body></html>

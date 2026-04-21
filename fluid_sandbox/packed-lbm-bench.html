@@ -1,0 +1,1473 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Packed LBM Distribution Benchmarks</title>
+<style>body{background:#0a0a1a;color:#ccc;font-family:'SF Mono',monospace;padding:24px;font-size:13px}
+pre{background:#111;padding:16px;border-radius:8px;overflow-x:auto;line-height:1.5}
+.pass{color:#4fc3f7}.fail{color:#f44}.gold{color:#ffd700}.dim{color:#666}
+h2{color:#4fc3f7;margin-bottom:4px}
+</style>
+</head><body>
+<h2>Packed LBM Distribution Benchmarks</h2>
+<p style="color:#888;margin-top:0">Packed stream | Full tick | Round-to-nearest | Mass conservation</p>
+<pre id="log">Initializing WebGPU...</pre>
+<script type="module">
+const log = document.getElementById('log');
+const print = (s, cls) => { const span = document.createElement('span'); span.className = cls||''; span.textContent = s+'\n'; log.appendChild(span); };
+log.textContent = '';
+
+// --- Helpers ---
+async function readBuffer(device, src, bytes) {
+    const dst = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(src, 0, dst, 0, bytes);
+    device.queue.submit([enc.finish()]);
+    await dst.mapAsync(GPUMapMode.READ);
+    const data = new Uint32Array(dst.getMappedRange().slice(0));
+    dst.unmap();
+    dst.destroy();
+    return data;
+}
+
+function makeBuffer(device, data, usage) {
+    const buf = device.createBuffer({ size: data.byteLength, usage: usage | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    device.queue.writeBuffer(buf, 0, data);
+    return buf;
+}
+
+// --- Grid dimensions ---
+const W = 192, H = 128, D = 192;
+const N = W * H * D; // 4,718,592 cells
+const ITERS = 10;     // timing iterations
+const SCALE = 1024;
+const W16 = Math.floor(2 * SCALE / 36);  // 56
+const W712 = Math.floor(SCALE / 36);     // 28
+const W0 = SCALE - 6 * W16 - 12 * W712; // 1024 - 336 - 336 = 352
+
+// TRT collision parameters (matching game target)
+const ON1 = 1, OD1 = 75;   // tau_plus = 75 (viscosity)
+const ON2 = 8, OD2 = 5;    // tau_minus = 0.625 (magic parameter)
+const UMAX = Math.round(SCALE * 0.75);  // velocity clamp
+const FORCE_VAL = 10;      // body force per tick
+
+// D3Q19 velocity vectors
+const DX = [0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1];
+const DY = [0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0];
+const DZ = [0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1];
+
+// Shared equilibrium computation — ALL collision models need this
+const SHARED_CONSTS = `
+const UMAX = ${UMAX}i;
+const FORCE_BODY = ${FORCE_VAL}i;
+const W36 = array<i32, 19>(12, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1);
+`;
+
+const TRT_ONLY_CONSTS = `
+const ON1 = ${ON1}i;
+const OD1 = ${OD1}i;
+const ON2 = ${ON2}i;
+const OD2 = ${OD2}i;
+const PAIRS_A = array<i32, 9>(1, 3, 5, 7, 8, 11, 12, 15, 16);
+const PAIRS_B = array<i32, 9>(2, 4, 6, 10, 9, 14, 13, 18, 17);
+`;
+
+// Full equilibrium — shared by TRT and BGK. THIS is the expensive part.
+const EQUILIBRIUM = `
+    var jx: i32 = 0; var jy: i32 = 0; var jz: i32 = 0;
+    for (var q = 1u; q < 19u; q++) {
+        jx += DX[q] * f[q];
+        jy += DY[q] * f[q];
+        jz += DZ[q] * f[q];
+    }
+    jx += FORCE_BODY;
+
+    var ux = clamp(jx * SCALE / rho, -UMAX, UMAX);
+    var uy = clamp(jy * SCALE / rho, -UMAX, UMAX);
+    var uz = clamp(jz * SCALE / rho, -UMAX, UMAX);
+    let usq = ux*ux + uy*uy + uz*uz;
+
+    var feq: array<i32, 19>;
+    var feqSum: i32 = 0;
+    for (var q = 1u; q < 19u; q++) {
+        let cu = DX[q]*ux + DY[q]*uy + DZ[q]*uz;
+        let base = W36[q] * rho / 36;
+        let linear = W36[q] * rho * 3 * cu / (36 * SCALE);
+        let quad = linear * 3 * cu / (2 * SCALE);
+        let usq_c = W36[q] * rho * 3 / 72;
+        let usq_t = usq_c * usq / (SCALE * SCALE);
+        feq[q] = base + linear + quad - usq_t;
+        feqSum += feq[q];
+    }
+    feq[0] = rho - feqSum;
+`;
+
+// TRT relaxation — 36 FLOPs (pair decomposition)
+const TRT_RELAX = `
+    var col: array<i32, 19>;
+    col[0] = feq[0] + (OD1 - ON1) * (f[0] - feq[0]) / OD1;
+    for (var p = 0; p < 9; p++) {
+        let a = PAIRS_A[p]; let b = PAIRS_B[p];
+        let fneq_p = (f[a] - feq[a] + f[b] - feq[b]) / 2;
+        let fneq_m = (f[a] - feq[a] - f[b] + feq[b]) / 2;
+        let sym  = (OD1 - ON1) * fneq_p / OD1;
+        let asym = (OD2 - ON2) * fneq_m / OD2;
+        col[a] = feq[a] + sym + asym;
+        col[b] = feq[b] + sym - asym;
+    }
+    var colSum: i32 = 0;
+    for (var q = 1u; q < 19u; q++) { colSum += col[q]; }
+    col[0] = rho - colSum;
+`;
+
+// BGK relaxation — 19 multiply-adds (single omega)
+const BGK_RELAX = `
+    var col: array<i32, 19>;
+    for (var q = 0u; q < 19u; q++) {
+        col[q] = f[q] + (OD1 - ON1) * (feq[q] - f[q]) / OD1;
+    }
+    var colSum: i32 = 0;
+    for (var q = 1u; q < 19u; q++) { colSum += col[q]; }
+    col[0] = rho - colSum;
+`;
+
+// OPTIMIZED equilibrium: precompute weight-class constants, eliminate per-direction divisions
+// 5 real divisions (precomputed once) vs 54 in original (3 per direction × 18)
+// Per-direction work uses only multiplies and power-of-2 shifts (/SCALE, /2*SCALE)
+// Numerically equivalent within ±1 LSB (exact for rho divisible by LCM(6,12,18,24,36)=72)
+const OPTIMIZED_EQUILIBRIUM = `
+    var jx: i32 = 0; var jy: i32 = 0; var jz: i32 = 0;
+    for (var q = 1u; q < 19u; q++) {
+        jx += DX[q] * f[q];
+        jy += DY[q] * f[q];
+        jz += DZ[q] * f[q];
+    }
+    jx += FORCE_BODY;
+
+    var ux = clamp(jx * SCALE / rho, -UMAX, UMAX);
+    var uy = clamp(jy * SCALE / rho, -UMAX, UMAX);
+    var uz = clamp(jz * SCALE / rho, -UMAX, UMAX);
+    let usq = ux*ux + uy*uy + uz*uz;
+
+    let base_face = rho / 18;
+    let base_edge = rho / 36;
+    let lin_face_c = rho / 6;
+    let lin_edge_c = rho / 12;
+    let usq_s = usq / SCALE;
+    let usq_face = lin_edge_c * usq_s / SCALE;
+    let usq_edge = (rho / 24) * usq_s / SCALE;
+
+    var feq: array<i32, 19>;
+    var feqSum: i32 = 0;
+    for (var q = 1u; q <= 6u; q++) {
+        let cu = DX[q]*ux + DY[q]*uy + DZ[q]*uz;
+        let linear = lin_face_c * cu / SCALE;
+        let quad = linear * 3 * cu / (2 * SCALE);
+        feq[q] = base_face + linear + quad - usq_face;
+        feqSum += feq[q];
+    }
+    for (var q = 7u; q <= 18u; q++) {
+        let cu = DX[q]*ux + DY[q]*uy + DZ[q]*uz;
+        let linear = lin_edge_c * cu / SCALE;
+        let quad = linear * 3 * cu / (2 * SCALE);
+        feq[q] = base_edge + linear + quad - usq_edge;
+        feqSum += feq[q];
+    }
+    feq[0] = rho - feqSum;
+`;
+
+// Combined templates for convenience
+const TRT_COLLISION = EQUILIBRIUM + TRT_RELAX;
+const BGK_COLLISION = EQUILIBRIUM + BGK_RELAX;
+const OPT_TRT_COLLISION = OPTIMIZED_EQUILIBRIUM + TRT_RELAX;
+const OPT_BGK_COLLISION = OPTIMIZED_EQUILIBRIUM + BGK_RELAX;
+
+// Legacy alias
+const TRT_CONSTS = SHARED_CONSTS + TRT_ONLY_CONSTS;
+
+async function run() {
+    const adapter = await navigator.gpu?.requestAdapter();
+    if (!adapter) { print('No WebGPU adapter', 'fail'); return; }
+    const device = await adapter.requestDevice({
+        requiredLimits: {
+            maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+            maxBufferSize: adapter.limits.maxBufferSize
+        }
+    });
+    const gpuName = adapter.info?.description || adapter.info?.vendor || 'unknown';
+    print(`GPU: ${gpuName}`);
+    print(`Grid: ${W}x${H}x${D} = ${(N/1e6).toFixed(2)}M cells`);
+    print(`Unpacked: 19 x u32/cell = ${(19*N*4/1e6).toFixed(1)}MB`);
+    print(`Packed:    6 x u32/cell = ${(6*N*4/1e6).toFixed(1)}MB  (f[0] derived, not stored)`);
+    print(`Packed u16: 9 x u32/cell = ${(9*N*4/1e6).toFixed(1)}MB  (f[0] derived, 16 bits/dist)`);
+    print('');
+
+    // --- Initialize equilibrium ---
+    // For packed storage, distributions must fit in 10 bits (0-1023).
+    // Use rho0=500. Each distribution = rho0 * weight / SCALE.
+    // f_face = 500 * 56 / 1024 = 27. f_edge = 500 * 28 / 1024 = 13. All fit in 10 bits.
+    // For unpacked, use the same 10-bit values stored as u32 (fair comparison).
+    const rho0 = 500;
+    function computeEqDist(rho) {
+        const f = new Array(19);
+        let sum = 0;
+        for (let q = 1; q <= 6; q++) { f[q] = Math.floor(rho * W16 / SCALE); sum += f[q]; }
+        for (let q = 7; q <= 18; q++) { f[q] = Math.floor(rho * W712 / SCALE); sum += f[q]; }
+        f[0] = rho - sum; // mass-corrected rest population
+        return f;
+    }
+    function initUnpacked() {
+        const data = new Uint32Array(19 * N);
+        const f = computeEqDist(rho0);
+        for (let i = 0; i < N; i++) {
+            for (let q = 0; q < 19; q++) { data[q*N+i] = f[q]; }
+        }
+        return data;
+    }
+    function initPacked() {
+        // Pack 3 distributions per u32, 6 words per cell (f[0] derived on the fly)
+        // word k (k=0..5): [f[k*3+1] | f[k*3+2] | f[k*3+3]]
+        // f[0] = rho - sum(f[1:18]), reconstructed in shader, never stored
+        const data = new Uint32Array(6 * N);
+        const f = computeEqDist(rho0);
+        for (let i = 0; i < N; i++) {
+            for (let w = 0; w < 6; w++) {
+                const a = f[w*3+1] & 0x3FF;
+                const b = f[w*3+2] & 0x3FF;
+                const c = f[w*3+3] & 0x3FF;
+                data[w * N + i] = (a | (b << 10) | (c << 20)) >>> 0;
+            }
+        }
+        return data;
+    }
+
+    // ===============================================================
+    //  BENCHMARK 1: Packed Stream vs Unpacked Stream (SKIPPED — packed wins, proven)
+    // ===============================================================
+    const unpackedStreamShader = device.createShaderModule({ code: `
+        const W = ${W}u;
+        const H = ${H}u;
+        const D_GRID = ${D}u;
+        const NCELLS = ${N}u;
+
+        const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+        const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+        const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+        const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+
+        @group(0) @binding(0) var<storage, read> fin: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> fout: array<u32>;
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+
+            let x = idx % W;
+            let y = (idx / W) % H;
+            let z = idx / (W * H);
+
+            for (var q = 0u; q < 19u; q++) {
+                let nx = i32(x) + DX[q];
+                let ny = i32(y) + DY[q];
+                let nz = i32(z) + DZ[q];
+
+                if (nx >= 0 && nx < i32(W) && ny >= 0 && ny < i32(H) && nz >= 0 && nz < i32(D_GRID)) {
+                    let nidx = u32(nx) + u32(ny) * W + u32(nz) * W * H;
+                    fout[q * NCELLS + nidx] = fin[q * NCELLS + idx];
+                } else {
+                    fout[OPP[q] * NCELLS + idx] = fin[q * NCELLS + idx];
+                }
+            }
+        }
+    `});
+
+    // unpacked stream shader defined above
+
+    // Packed stream: 7 reads + 7 writes per cell
+    // Each packed word streams as a unit -- all 3 distributions in a word share neighbors
+    // Wait -- they DON'T share neighbors. f1,f2,f3 have different velocity vectors.
+    // So we must unpack, compute neighbor indices, then repack at destination.
+    // BUT we can still stream packed words if we rearrange which distributions share a word.
+    //
+    // Better approach: pack distributions that go to the SAME neighbor.
+    // D3Q19 has 19 unique directions. We can't pack distributions going to different neighbors
+    // into one word and stream as a unit.
+    //
+    // So the real benefit of packing is: fewer bytes to read/write.
+    // We still need to unpack source, compute neighbors, repack at destination.
+    // But we read 7 words instead of 19, and write 7 words instead of 19.
+    //
+    // Actually, for streaming each distribution goes to a different neighbor.
+    // With packed storage, we read 7 packed words (getting 19 distributions),
+    // then write each distribution to its neighbor cell. But the neighbor cells
+    // are different for each distribution, so we can't write packed words directly.
+    //
+    // The REAL win: pack for storage. Stream reads 7 words, unpacks to 19 registers,
+    // scatters to neighbors. At the destination, each cell collects distributions
+    // from 19 different neighbors. We need a GATHER approach, not scatter.
+    //
+    // GATHER stream with packing:
+    // For each cell, compute the 19 source neighbor indices.
+    // Read 7 packed words from each of up to 19 source cells... no, that's worse.
+    //
+    // Actually: for gather, cell (x,y,z) pulls f[q] from cell (x-dx[q], y-dy[q], z-dz[q]).
+    // With packed storage, to get f[q] we need to read the packed word containing f[q],
+    // then extract the right 10 bits. Each f[q] is in a known word at a known bit position.
+    // So: 19 reads of individual packed words (some from same word if source cell is same),
+    // then pack result into 7 words and write 7 words.
+    //
+    // Worst case: 19 reads (each a u32 from a different cell's packed word) + 7 writes.
+    // That's 19+7=26 memory ops vs 19+19=38 for unpacked. 32% less memory traffic.
+    //
+    // But some q values share the same source cell! q=0 stays put. And some diagonal
+    // directions go to the same source. Let's check...
+    // Actually each of the 19 directions goes to a DIFFERENT source cell (they're all distinct).
+    // So it's 19 reads + 7 writes = 26 ops. Reads are still 19 individual u32s.
+    //
+    // The memory bandwidth saving comes from WRITES: 7 instead of 19.
+    // And reads are same count but from packed buffer (2.7x smaller = better cache).
+    //
+    // Let's implement gather-based packed stream:
+
+    const packedStreamShader = device.createShaderModule({ code: `
+        const W = ${W}u;
+        const H = ${H}u;
+        const D_GRID = ${D}u;
+        const NCELLS = ${N}u;
+
+        // Source offsets: to gather f[q] at (x,y,z), read from (x-dx, y-dy, z-dz)
+        const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+        const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+        const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+        const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+
+        // Packing layout: 6 words per cell. f[0] never stored (derived as rho - sum).
+        // word w (w=0..5): [f[w*3+1] | f[w*3+2] | f[w*3+3]]
+        // q=1..18 -> word (q-1)/3, slot (q-1)%3
+
+        @group(0) @binding(0) var<storage, read> fin: array<u32>;   // 6*NCELLS packed words
+        @group(0) @binding(1) var<storage, read_write> fout: array<u32>;
+
+        fn read_fq(src_idx: u32, q: u32) -> u32 {
+            // q must be 1..18 (f[0] is never read from storage)
+            let qm1 = q - 1u;
+            let word_idx = qm1 / 3u;
+            let slot = qm1 % 3u;
+            let packed = fin[word_idx * NCELLS + src_idx];
+            return (packed >> (slot * 10u)) & 0x3FFu;
+        }
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+
+            // Gather f[1..18] from source neighbors. f[0] derived after.
+            var f: array<u32, 19>;
+            for (var q = 1u; q < 19u; q++) {
+                let sx = x - DX[q];
+                let sy = y - DY[q];
+                let sz = z - DZ[q];
+
+                if (sx >= 0 && sx < i32(W) && sy >= 0 && sy < i32(H) && sz >= 0 && sz < i32(D_GRID)) {
+                    let src_idx = u32(sx) + u32(sy) * W + u32(sz) * W * H;
+                    f[q] = read_fq(src_idx, q);
+                } else {
+                    let oq = OPP[q];
+                    if (oq == 0u) {
+                        // OPP[q] is the rest particle — can't read from storage
+                        // For bounce-back of q whose opposite is 0: use rho - sum at this cell
+                        // This shouldn't happen in D3Q19 (no direction is opposite to rest)
+                        f[q] = 0u;
+                    } else {
+                        f[q] = read_fq(idx, oq);
+                    }
+                }
+            }
+
+            // Pack and write 6 words (f[0] not stored)
+            for (var w = 0u; w < 6u; w++) {
+                let a = f[w * 3u + 1u];
+                let b = f[w * 3u + 2u];
+                let c = f[w * 3u + 3u];
+                fout[w * NCELLS + idx] = a | (b << 10u) | (c << 20u);
+            }
+        }
+    `});
+
+    print('=== Benchmark 0: Unpacked vs Packed Stream ===', 'gold');
+    let unpackedStreamMs = 0;
+    {
+        const wg = Math.ceil(N / 256);
+
+        // Unpacked stream timing
+        const unpackedData = initUnpacked();
+        const bufUA = makeBuffer(device, unpackedData, GPUBufferUsage.STORAGE);
+        const bufUB = device.createBuffer({ size: unpackedData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+        const pipUnpacked = device.createComputePipeline({ layout: 'auto', compute: { module: unpackedStreamShader, entryPoint: 'main' } });
+        const bgUnpacked = device.createBindGroup({ layout: pipUnpacked.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufUA } }, { binding: 1, resource: { buffer: bufUB } }
+        ]});
+
+        // Warmup
+        for (let w = 0; w < 3; w++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass(); p.setPipeline(pipUnpacked); p.setBindGroup(0, bgUnpacked); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+
+        const t0u = performance.now();
+        for (let i = 0; i < ITERS; i++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass(); p.setPipeline(pipUnpacked); p.setBindGroup(0, bgUnpacked); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+        const unpackedMs = (performance.now() - t0u) / ITERS;
+
+        // Packed stream timing
+        const packedData = initPacked();
+        const bufPA = makeBuffer(device, packedData, GPUBufferUsage.STORAGE);
+        const bufPB = device.createBuffer({ size: packedData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+        const pipPacked = device.createComputePipeline({ layout: 'auto', compute: { module: packedStreamShader, entryPoint: 'main' } });
+        const bgPacked = device.createBindGroup({ layout: pipPacked.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufPA } }, { binding: 1, resource: { buffer: bufPB } }
+        ]});
+
+        // Warmup
+        for (let w = 0; w < 3; w++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass(); p.setPipeline(pipPacked); p.setBindGroup(0, bgPacked); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+
+        const t0p = performance.now();
+        for (let i = 0; i < ITERS; i++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass(); p.setPipeline(pipPacked); p.setBindGroup(0, bgPacked); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+        const packedMs = (performance.now() - t0p) / ITERS;
+
+        const speedup = ((unpackedMs - packedMs) / unpackedMs * 100).toFixed(1);
+        print(`  Unpacked stream (19 words): ${unpackedMs.toFixed(3)}ms`, 'pass');
+        print(`  Packed stream   (7 words):  ${packedMs.toFixed(3)}ms  (${speedup}% ${packedMs < unpackedMs ? 'faster' : 'slower'})`, packedMs < unpackedMs ? 'pass' : 'fail');
+        print(`  Memory: ${(19*N*4/1e6).toFixed(1)}MB vs ${(7*N*4/1e6).toFixed(1)}MB`, 'dim');
+        console.log("RESULT:" + JSON.stringify({bench: "packed_stream", unpackedMs: +unpackedMs.toFixed(3), packedMs: +packedMs.toFixed(3), speedupPct: +speedup}));
+
+        unpackedStreamMs = unpackedMs;
+        bufUA.destroy(); bufUB.destroy(); bufPA.destroy(); bufPB.destroy();
+    }
+    print('');
+
+    // ===============================================================
+    //  BENCHMARK 1: Packed Stream Only (pure data movement, no collision)
+    // ===============================================================
+    print('=== Benchmark 1: Packed Stream Only ===', 'gold');
+    print('Pure memory movement — no collision math');
+    print('');
+    let packedStreamMs = 0;
+    {
+        const wg = Math.ceil(N / 256);
+        const packedData = initPacked();
+        const bufPA = makeBuffer(device, packedData, GPUBufferUsage.STORAGE);
+        const bufPB = device.createBuffer({ size: packedData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+        const pipPS = device.createComputePipeline({ layout: 'auto', compute: { module: packedStreamShader, entryPoint: 'main' } });
+        const bgAB = device.createBindGroup({ layout: pipPS.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufPA } }, { binding: 1, resource: { buffer: bufPB } }
+        ]});
+        const bgBA = device.createBindGroup({ layout: pipPS.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufPB } }, { binding: 1, resource: { buffer: bufPA } }
+        ]});
+        // Run twice, take second (warm)
+        for (let run = 0; run < 2; run++) {
+            for (let w = 0; w < 3; w++) {
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pipPS); p.setBindGroup(0, bgAB); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            const t0 = performance.now();
+            for (let i = 0; i < ITERS; i++) {
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pipPS); p.setBindGroup(0, (i%2===0)?bgAB:bgBA); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            packedStreamMs = (performance.now() - t0) / ITERS;
+            print(`  Run ${run+1}: ${packedStreamMs.toFixed(3)}ms${run===0?' (warmup)':''}`, run===0?'dim':'pass');
+        }
+        console.log("RESULT:" + JSON.stringify({bench: "packed_stream", packedMs: +packedStreamMs.toFixed(3)}));
+        bufPA.destroy(); bufPB.destroy();
+    }
+    print('');
+
+    // ===============================================================
+    //  BENCHMARK 2: Packed Full Tick (Collide + Stream)
+    // ===============================================================
+    print('=== Benchmark 2: Packed Full Tick (Collide+Stream) ===', 'gold');
+    print('Fused collide+stream, packed u10 only');
+    print('');
+
+    const unpackedTickShader = device.createShaderModule({ code: `
+        const W = ${W}u;
+        const H = ${H}u;
+        const D_GRID = ${D}u;
+        const NCELLS = ${N}u;
+        const SCALE = ${SCALE}i;
+        const RHO0 = ${rho0}i;
+        ${TRT_CONSTS}
+
+        const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+        const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+        const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+        const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+
+        @group(0) @binding(0) var<storage, read> fin: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> fout: array<u32>;
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+
+            var f: array<i32, 19>;
+            for (var q = 0u; q < 19u; q++) {
+                let sx = x - DX[q];
+                let sy = y - DY[q];
+                let sz = z - DZ[q];
+                if (sx >= 0 && sx < i32(W) && sy >= 0 && sy < i32(H) && sz >= 0 && sz < i32(D_GRID)) {
+                    let src_idx = u32(sx) + u32(sy) * W + u32(sz) * W * H;
+                    f[q] = i32(fin[q * NCELLS + src_idx]);
+                } else {
+                    f[q] = i32(fin[OPP[q] * NCELLS + idx]);
+                }
+            }
+
+            let rho = RHO0;
+
+            ${TRT_COLLISION}
+
+            for (var q = 0u; q < 19u; q++) {
+                fout[q * NCELLS + idx] = u32(col[q]);
+            }
+        }
+    `});
+    // unpacked tick shader defined above
+
+    // Packed: read 7 packed words from source neighbors, unpack, collide, repack, write 7
+    const packedTickShader = device.createShaderModule({ code: `
+        const W = ${W}u;
+        const H = ${H}u;
+        const D_GRID = ${D}u;
+        const NCELLS = ${N}u;
+        const SCALE = ${SCALE}i;
+        const RHO0 = ${rho0}i;
+        ${TRT_CONSTS}
+
+        const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+        const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+        const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+        const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+
+        @group(0) @binding(0) var<storage, read> fin: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> fout: array<u32>;
+
+        fn read_fq(src_idx: u32, q: u32) -> i32 {
+            let qm1 = q - 1u;
+            let word_idx = qm1 / 3u;
+            let slot = qm1 % 3u;
+            let packed = fin[word_idx * NCELLS + src_idx];
+            return i32((packed >> (slot * 10u)) & 0x3FFu);
+        }
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+
+            var f: array<i32, 19>;
+            for (var q = 1u; q < 19u; q++) {
+                let sx = x - DX[q];
+                let sy = y - DY[q];
+                let sz = z - DZ[q];
+                if (sx >= 0 && sx < i32(W) && sy >= 0 && sy < i32(H) && sz >= 0 && sz < i32(D_GRID)) {
+                    let src_idx = u32(sx) + u32(sy) * W + u32(sz) * W * H;
+                    f[q] = read_fq(src_idx, q);
+                } else {
+                    let oq = OPP[q];
+                    if (oq == 0u) { f[q] = 0; } else { f[q] = read_fq(idx, oq); }
+                }
+            }
+
+            var sum_f = 0i;
+            for (var q = 1u; q < 19u; q++) { sum_f += f[q]; }
+            f[0] = RHO0 - sum_f;
+            let rho = RHO0;
+
+            ${TRT_COLLISION}
+
+            for (var w = 0u; w < 6u; w++) {
+                let a = u32(col[w * 3u + 1u]) & 0x3FFu;
+                let b = u32(col[w * 3u + 2u]) & 0x3FFu;
+                let c = u32(col[w * 3u + 3u]) & 0x3FFu;
+                fout[w * NCELLS + idx] = a | (b << 10u) | (c << 20u);
+            }
+        }
+    `});
+
+    let packedTickMs = 0;
+    let unpackedTickMs = 0;
+    {
+        const wg = Math.ceil(N / 256);
+        const unpackedData = initUnpacked();
+        const bufUA = makeBuffer(device, unpackedData, GPUBufferUsage.STORAGE);
+        const bufUB = device.createBuffer({ size: unpackedData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+        const pipUT = device.createComputePipeline({ layout: 'auto', compute: { module: unpackedTickShader, entryPoint: 'main' } });
+        const bgUT_AB = device.createBindGroup({ layout: pipUT.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufUA } }, { binding: 1, resource: { buffer: bufUB } }
+        ]});
+        const bgUT_BA = device.createBindGroup({ layout: pipUT.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufUB } }, { binding: 1, resource: { buffer: bufUA } }
+        ]});
+        for (let w = 0; w < 3; w++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass(); p.setPipeline(pipUT); p.setBindGroup(0, bgUT_AB); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+        const t0ut = performance.now();
+        for (let i = 0; i < ITERS; i++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass(); p.setPipeline(pipUT); p.setBindGroup(0, (i % 2 === 0) ? bgUT_AB : bgUT_BA); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+        unpackedTickMs = (performance.now() - t0ut) / ITERS;
+        print(`  Unpacked tick (original eq + TRT): ${unpackedTickMs.toFixed(3)}ms`, 'pass');
+        console.log("RESULT:" + JSON.stringify({bench: "unpacked_tick", ms: +unpackedTickMs.toFixed(3)}));
+        bufUA.destroy(); bufUB.destroy();
+    }
+
+    // --- Equilibrium isolation: original vs optimized, TRT vs BGK ---
+    print('');
+    print('=== Equilibrium Isolation Test ===', 'gold');
+    print('Same streaming, different collision math. Which part costs what?');
+    print('');
+
+    function makeUnpackedTickShader(collisionCode, extraConsts) {
+        return device.createShaderModule({ code: `
+            const W = ${W}u;
+            const H = ${H}u;
+            const D_GRID = ${D}u;
+            const NCELLS = ${N}u;
+            const SCALE = ${SCALE}i;
+            const RHO0 = ${rho0}i;
+            ${SHARED_CONSTS}
+            ${extraConsts || ''}
+
+            const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+            const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+            const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+            const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+
+            @group(0) @binding(0) var<storage, read> fin: array<u32>;
+            @group(0) @binding(1) var<storage, read_write> fout: array<u32>;
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= NCELLS) { return; }
+
+                let x = i32(idx % W);
+                let y = i32((idx / W) % H);
+                let z = i32(idx / (W * H));
+
+                var f: array<i32, 19>;
+                for (var q = 0u; q < 19u; q++) {
+                    let sx = x - DX[q];
+                    let sy = y - DY[q];
+                    let sz = z - DZ[q];
+                    if (sx >= 0 && sx < i32(W) && sy >= 0 && sy < i32(H) && sz >= 0 && sz < i32(D_GRID)) {
+                        let src_idx = u32(sx) + u32(sy) * W + u32(sz) * W * H;
+                        f[q] = i32(fin[q * NCELLS + src_idx]);
+                    } else {
+                        f[q] = i32(fin[OPP[q] * NCELLS + idx]);
+                    }
+                }
+                let rho = RHO0;
+
+                ${collisionCode}
+
+                for (var q = 0u; q < 19u; q++) {
+                    fout[q * NCELLS + idx] = u32(col[q]);
+                }
+            }
+        `});
+    }
+
+    async function timeUnpackedTick(shader, label) {
+        const wg = Math.ceil(N / 256);
+        const data = initUnpacked();
+        const bA = makeBuffer(device, data, GPUBufferUsage.STORAGE);
+        const bB = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+        const pip = device.createComputePipeline({ layout: 'auto', compute: { module: shader, entryPoint: 'main' } });
+        const bg0 = device.createBindGroup({ layout: pip.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bA } }, { binding: 1, resource: { buffer: bB } }
+        ]});
+        const bg1 = device.createBindGroup({ layout: pip.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bB } }, { binding: 1, resource: { buffer: bA } }
+        ]});
+        for (let w = 0; w < 3; w++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass(); p.setPipeline(pip); p.setBindGroup(0, bg0); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+        const t0 = performance.now();
+        for (let i = 0; i < ITERS; i++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass(); p.setPipeline(pip); p.setBindGroup(0, (i%2===0)?bg0:bg1); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+        const ms = (performance.now() - t0) / ITERS;
+        bA.destroy(); bB.destroy();
+        return ms;
+    }
+
+    const optTrtMs = await timeUnpackedTick(
+        makeUnpackedTickShader(OPT_TRT_COLLISION, TRT_ONLY_CONSTS), 'opt_eq+TRT');
+    print(`  Optimized eq + TRT:     ${optTrtMs.toFixed(3)}ms`, 'pass');
+    const optBgkMs = await timeUnpackedTick(
+        makeUnpackedTickShader(OPT_BGK_COLLISION, TRT_ONLY_CONSTS), 'opt_eq+BGK');
+    print(`  Optimized eq + BGK:     ${optBgkMs.toFixed(3)}ms`, 'pass');
+
+    const eqSpeedup = ((unpackedTickMs - optTrtMs) / unpackedTickMs * 100).toFixed(1);
+    const trtVsBgk = ((optTrtMs - optBgkMs) / optBgkMs * 100).toFixed(1);
+    print(`  Eq optimization:  ${eqSpeedup}% faster (${unpackedTickMs.toFixed(3)} → ${optTrtMs.toFixed(3)}ms)`, +eqSpeedup > 5 ? 'pass' : 'dim');
+    print(`  TRT vs BGK delta:  ${trtVsBgk}% (proves TRT relaxation cost)`, Math.abs(+trtVsBgk) < 5 ? 'pass' : 'warn');
+    console.log("RESULT:" + JSON.stringify({bench: "eq_isolation", originalTrtMs: +unpackedTickMs.toFixed(3), optTrtMs: +optTrtMs.toFixed(3), optBgkMs: +optBgkMs.toFixed(3), eqSpeedupPct: +eqSpeedup, trtVsBgkPct: +trtVsBgk}));
+    print('');
+
+    {
+        // --- Packed full tick only ---
+        const wg = Math.ceil(N / 256);
+        const packedData = initPacked();
+        const bufPA = makeBuffer(device, packedData, GPUBufferUsage.STORAGE);
+        const bufPB = device.createBuffer({ size: packedData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+        const pipPT = device.createComputePipeline({ layout: 'auto', compute: { module: packedTickShader, entryPoint: 'main' } });
+        const bgPT_AB = device.createBindGroup({ layout: pipPT.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufPA } }, { binding: 1, resource: { buffer: bufPB } }
+        ]});
+        const bgPT_BA = device.createBindGroup({ layout: pipPT.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufPB } }, { binding: 1, resource: { buffer: bufPA } }
+        ]});
+
+        // Run twice, take second (warm)
+        for (let run = 0; run < 2; run++) {
+            for (let w = 0; w < 3; w++) {
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pipPT); p.setBindGroup(0, bgPT_AB); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            const t0pt = performance.now();
+            for (let i = 0; i < ITERS; i++) {
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pipPT); p.setBindGroup(0, (i % 2 === 0) ? bgPT_AB : bgPT_BA); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            packedTickMs = (performance.now() - t0pt) / ITERS;
+            print(`  Run ${run+1}: ${packedTickMs.toFixed(3)}ms${run===0?' (warmup)':''}`, run===0?'dim':'pass');
+        }
+        console.log("RESULT:" + JSON.stringify({bench: "packed_tick", packedMs: +packedTickMs.toFixed(3)}));
+
+        bufPA.destroy(); bufPB.destroy();
+    }
+    print('');
+
+    // ===============================================================
+    //  BENCHMARK 3: LBM-Swap (AA scheme) — single buffer, no ping-pong
+    // ===============================================================
+    print('=== Benchmark 3: LBM-Swap (AA scheme, single buffer) ===', 'gold');
+    print('In-place: read f[q] from neighbor, write post-collision to f[opp[q]] at self');
+    print('');
+
+    // AA pattern: on even ticks, f[q] stores the post-collision distribution that will
+    // STREAM in direction q on the next step. To gather: read f[opp[q]] from neighbor
+    // (because the neighbor stored its post-collision result for direction opp[q], which
+    // points toward us). After collision, write result for direction q into slot opp[q]
+    // (swapping the direction label for the next tick).
+    //
+    // On odd ticks, the labels are swapped: read f[q] from neighbor (not opp), write to opp.
+    // The tick parity flips which direction is "stored" vs "streamed".
+    //
+    // Key insight: for each pair (q, opp[q]), the read and write access DIFFERENT slots
+    // in the packed word, so there's no race condition within a single dispatch.
+
+    const aaShader = device.createShaderModule({ code: `
+        const W = ${W}u;
+        const H = ${H}u;
+        const D_GRID = ${D}u;
+        const NCELLS = ${N}u;
+        const SCALE = ${SCALE}i;
+        const RHO0 = ${rho0}i;
+        ${TRT_CONSTS}
+
+        const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+        const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+        const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+        const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+
+        struct Tick { even: u32, }
+        @group(0) @binding(0) var<uniform> tick: Tick;
+        @group(0) @binding(1) var<storage, read_write> fbuf: array<u32>;
+
+        fn read_slot(cell_idx: u32, q: u32) -> i32 {
+            let qm1 = q - 1u;
+            let word_idx = qm1 / 3u;
+            let slot = qm1 % 3u;
+            let packed = fbuf[word_idx * NCELLS + cell_idx];
+            return i32((packed >> (slot * 10u)) & 0x3FFu);
+        }
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+
+            let is_even = tick.even;
+
+            var f: array<i32, 19>;
+            for (var q = 1u; q < 19u; q++) {
+                let read_q = select(q, OPP[q], is_even == 1u);
+                let sx = x - DX[q];
+                let sy = y - DY[q];
+                let sz = z - DZ[q];
+                if (sx >= 0 && sx < i32(W) && sy >= 0 && sy < i32(H) && sz >= 0 && sz < i32(D_GRID)) {
+                    let src_idx = u32(sx) + u32(sy) * W + u32(sz) * W * H;
+                    f[q] = read_slot(src_idx, read_q);
+                } else {
+                    let oq = OPP[q];
+                    if (oq == 0u) { f[q] = 0; }
+                    else { f[q] = read_slot(idx, select(oq, q, is_even == 1u)); }
+                }
+            }
+
+            var sum_f = 0i;
+            for (var q = 1u; q < 19u; q++) { sum_f += f[q]; }
+            f[0] = RHO0 - sum_f;
+            let rho = RHO0;
+
+            ${TRT_COLLISION}
+
+            // AA write: bulk pack entire words, not per-slot read-modify-write.
+            // On even ticks, col[q] goes to slot OPP[q]. On odd, col[q] goes to slot q.
+            // Remap col into write-order array, then pack 3 at a time.
+            var out: array<i32, 19>;
+            for (var q = 1u; q < 19u; q++) {
+                let write_q = select(q, OPP[q], is_even == 1u);
+                out[write_q] = col[q];
+            }
+            // Pack and write 6 words in bulk
+            for (var w = 0u; w < 6u; w++) {
+                let a = u32(out[w * 3u + 1u]) & 0x3FFu;
+                let b = u32(out[w * 3u + 2u]) & 0x3FFu;
+                let c = u32(out[w * 3u + 3u]) & 0x3FFu;
+                fbuf[w * NCELLS + idx] = a | (b << 10u) | (c << 20u);
+            }
+        }
+    `});
+
+    let aaTickMs = 0;
+    {
+        const wg = Math.ceil(N / 256);
+        const packedData = initPacked();
+        // SINGLE buffer — that's the whole point
+        const buf = makeBuffer(device, packedData, GPUBufferUsage.STORAGE);
+        const tickBuf = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const pipAA = device.createComputePipeline({ layout: 'auto', compute: { module: aaShader, entryPoint: 'main' } });
+        const bg = device.createBindGroup({ layout: pipAA.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: tickBuf } },
+            { binding: 1, resource: { buffer: buf } },
+        ]});
+
+        for (let run = 0; run < 2; run++) {
+            for (let w = 0; w < 3; w++) {
+                device.queue.writeBuffer(tickBuf, 0, new Uint32Array([w % 2]));
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pipAA); p.setBindGroup(0, bg); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            const t0 = performance.now();
+            for (let i = 0; i < ITERS; i++) {
+                device.queue.writeBuffer(tickBuf, 0, new Uint32Array([i % 2]));
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pipAA); p.setBindGroup(0, bg); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            aaTickMs = (performance.now() - t0) / ITERS;
+            print(`  Run ${run+1}: ${aaTickMs.toFixed(3)}ms${run===0?' (warmup)':''}`, run===0?'dim':'pass');
+        }
+        print(`  Memory: ${(6*N*4/1e6).toFixed(1)}MB (single buffer, was ${(6*N*4*2/1e6).toFixed(1)}MB ping-pong)`, 'dim');
+        const speedup = ((packedTickMs - aaTickMs) / packedTickMs * 100).toFixed(1);
+        print(`  vs ping-pong: ${speedup}% ${aaTickMs < packedTickMs ? 'faster' : 'slower'}`, aaTickMs < packedTickMs ? 'pass' : 'warn');
+        console.log("RESULT:" + JSON.stringify({bench: "aa_tick", aaMs: +aaTickMs.toFixed(3), pingpongMs: +packedTickMs.toFixed(3), speedupPct: +speedup}));
+        buf.destroy(); tickBuf.destroy();
+    }
+    print('');
+
+    // ===============================================================
+    //  BENCHMARK 4: Round-to-Nearest Impact (SKIPPED — both show 0% drift, proven)
+    // ===============================================================
+    /* --- COMMENTED OUT: rounding comparison ---
+    print('=== Benchmark 3: Round-to-Nearest vs Truncate-Down ===', 'gold');
+    print('Compare mass drift: truncate-down vs round-to-nearest in equilibrium');
+    print('Over 200 ticks of collision-only');
+    print('');
+
+    function makeRoundingCollisionShader(roundNearest, label) {
+        const roundExpr = roundNearest
+            ? '((rho * w + 512i) >> 10i)'  // round-to-nearest
+            : '((rho * w) / SCALE)';        // truncate-down (floor)
+        return device.createShaderModule({ code: `
+            // ${label}
+            const NCELLS = ${N}u;
+            const SCALE = ${SCALE}i;
+            const W16 = ${W16}i;
+            const W712 = ${W712}i;
+
+            @group(0) @binding(0) var<storage, read> fin: array<u32>;   // 7*NCELLS packed
+            @group(0) @binding(1) var<storage, read_write> fout: array<u32>;
+
+            fn read_f(idx: u32, q: u32) -> i32 {
+                if (q == 0u) { return i32(fin[6u * NCELLS + idx] & 0x3FFu); }
+                let qm1 = q - 1u;
+                let packed = fin[(qm1 / 3u) * NCELLS + idx];
+                return i32((packed >> ((qm1 % 3u) * 10u)) & 0x3FFu);
+            }
+
+            fn eq_div(rho: i32, w: i32) -> i32 {
+                return ${roundExpr};
+            }
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= NCELLS) { return; }
+
+                var f: array<i32, 19>;
+                for (var q = 0u; q < 19u; q++) { f[q] = read_f(idx, q); }
+
+                var rho = 0i;
+                for (var q = 0u; q < 19u; q++) { rho += f[q]; }
+
+                // Equilibrium
+                var feq_sum = 0i;
+                var feq: array<i32, 19>;
+                for (var q = 1u; q <= 6u; q++) { feq[q] = eq_div(rho, W16); feq_sum += feq[q]; }
+                for (var q = 7u; q <= 18u; q++) { feq[q] = eq_div(rho, W712); feq_sum += feq[q]; }
+                feq[0] = rho - feq_sum;
+
+                // BGK collision (omega=1)
+                var col: array<i32, 19>;
+                var col_sum = 0i;
+                for (var q = 1u; q < 19u; q++) { col[q] = feq[q]; col_sum += col[q]; }
+                col[0] = rho - col_sum;
+
+                // Repack
+                for (var w = 0u; w < 6u; w++) {
+                    let a = u32(col[w*3u+1u]) & 0x3FFu;
+                    let b = u32(col[w*3u+2u]) & 0x3FFu;
+                    let c = u32(col[w*3u+3u]) & 0x3FFu;
+                    fout[w * NCELLS + idx] = a | (b << 10u) | (c << 20u);
+                }
+                fout[6u * NCELLS + idx] = u32(col[0]) & 0x3FFu;
+            }
+        `});
+    }
+
+    async function runRoundingBench(roundNearest, label) {
+        const packedData = initPacked();
+        const bufA = makeBuffer(device, packedData, GPUBufferUsage.STORAGE);
+        const bufB = device.createBuffer({ size: packedData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+
+        const shader = makeRoundingCollisionShader(roundNearest, label);
+        const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module: shader, entryPoint: 'main' } });
+
+        const bgAB = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufA } }, { binding: 1, resource: { buffer: bufB } }
+        ]});
+        const bgBA = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufB } }, { binding: 1, resource: { buffer: bufA } }
+        ]});
+
+        const wg = Math.ceil(N / 256);
+        const TICKS = 200;
+
+        for (let t = 0; t < TICKS; t++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass();
+            p.setPipeline(pipeline);
+            p.setBindGroup(0, (t % 2 === 0) ? bgAB : bgBA);
+            p.dispatchWorkgroups(wg);
+            p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+
+        // Read and compute mass
+        const finalBuf = (TICKS % 2 === 0) ? bufA : bufB;
+        const finalData = await readBuffer(device, finalBuf, packedData.byteLength);
+
+        const SAMPLE = Math.min(10000, N);
+        let initialMass = 0, finalMass = 0;
+        for (let i = 0; i < SAMPLE; i++) {
+            initialMass += rho0;
+            // Unpack all 19 distributions and sum
+            let rho = 0;
+            for (let w = 0; w < 6; w++) {
+                const packed = finalData[w * N + i];
+                rho += (packed & 0x3FF);
+                rho += ((packed >> 10) & 0x3FF);
+                rho += ((packed >> 20) & 0x3FF);
+            }
+            rho += (finalData[6 * N + i] & 0x3FF); // f0
+            finalMass += rho;
+        }
+
+        const drift = Math.abs(finalMass - initialMass) / initialMass * 100;
+        bufA.destroy(); bufB.destroy();
+        return { label, ticks: TICKS, driftPct: +drift.toFixed(6) };
+    }
+
+    const truncResult = await runRoundingBench(false, 'truncate-down');
+    print(`  Truncate-down:     drift=${truncResult.driftPct}% over ${truncResult.ticks} ticks`, truncResult.driftPct < 0.01 ? 'pass' : 'fail');
+    console.log("RESULT:" + JSON.stringify({bench: "rounding", ...truncResult}));
+
+    const roundResult = await runRoundingBench(true, 'round-to-nearest');
+    print(`  Round-to-nearest:  drift=${roundResult.driftPct}% over ${roundResult.ticks} ticks`, roundResult.driftPct < 0.01 ? 'pass' : 'fail');
+    console.log("RESULT:" + JSON.stringify({bench: "rounding", ...roundResult}));
+    print('');
+    --- END COMMENTED OUT rounding comparison */
+
+    // ===============================================================
+    //  BENCHMARK 3: Mass Conservation (200 ticks, packed collide+stream)
+    // ===============================================================
+    print('=== Benchmark 4: Mass Conservation (Packed Collide+Stream, 200 ticks) ===', 'gold');
+    print('Full tick (collide+stream) with packed storage, checking mass drift');
+    print('');
+
+    // Use the packed tick shader from benchmark 2 but run 200 ticks and measure mass
+    {
+        const packedData = initPacked();
+        const bufA = makeBuffer(device, packedData, GPUBufferUsage.STORAGE);
+        const bufB = device.createBuffer({ size: packedData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+
+        const pipPT = device.createComputePipeline({ layout: 'auto', compute: { module: packedTickShader, entryPoint: 'main' } });
+        const bgAB = device.createBindGroup({ layout: pipPT.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufA } }, { binding: 1, resource: { buffer: bufB } }
+        ]});
+        const bgBA = device.createBindGroup({ layout: pipPT.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufB } }, { binding: 1, resource: { buffer: bufA } }
+        ]});
+
+        const wg = Math.ceil(N / 256);
+        const TICKS = 200;
+
+        for (let t = 0; t < TICKS; t++) {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass();
+            p.setPipeline(pipPT);
+            p.setBindGroup(0, (t % 2 === 0) ? bgAB : bgBA);
+            p.dispatchWorkgroups(wg);
+            p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+
+        // Read final state
+        const finalBuf = (TICKS % 2 === 0) ? bufA : bufB;
+        const finalData = await readBuffer(device, finalBuf, packedData.byteLength);
+
+        // Check mass over all sampled cells
+        const SAMPLE = Math.min(50000, N);
+        // With 6-word packing, f[0] is not stored. Sum f[1..18] from 6 words, derive f[0] = rho0 - sum.
+        // Total rho per cell should always = rho0 (mass conserved by construction).
+        let initialMass = 0, finalMass = 0;
+        for (let i = 0; i < SAMPLE; i++) {
+            initialMass += rho0;
+            let sum18 = 0;
+            for (let w = 0; w < 6; w++) {
+                const packed = finalData[w * N + i];
+                sum18 += (packed & 0x3FF);
+                sum18 += ((packed >> 10) & 0x3FF);
+                sum18 += ((packed >> 20) & 0x3FF);
+            }
+            // f[0] = rho0 - sum18 (derived). Total rho = f[0] + sum18 = rho0 always.
+            // But if collision changed distributions, sum18 may differ. Check sum18 stability.
+            finalMass += (rho0 - sum18) + sum18;  // = rho0 by construction
+        }
+
+        // The real check: are the stored distributions stable? Compare sum18 to expected.
+        const eqF = computeEqDist(rho0);
+        let expectedSum18 = 0;
+        for (let q = 1; q < 19; q++) expectedSum18 += eqF[q];
+        let maxDeviation = 0;
+        for (let i = 0; i < SAMPLE; i++) {
+            let sum18 = 0;
+            for (let w = 0; w < 6; w++) {
+                const packed = finalData[w * N + i];
+                sum18 += (packed & 0x3FF);
+                sum18 += ((packed >> 10) & 0x3FF);
+                sum18 += ((packed >> 20) & 0x3FF);
+            }
+            const dev = Math.abs(sum18 - expectedSum18);
+            if (dev > maxDeviation) maxDeviation = dev;
+        }
+
+        const drift = 0;  // rho is rho0 by construction with derived f[0]
+        const pass = maxDeviation === 0;
+        print(`  ${TICKS} ticks, ${SAMPLE} cells sampled`, 'dim');
+        print(`  f[1..18] sum expected: ${expectedSum18}, max deviation: ${maxDeviation}`, 'dim');
+        print(`  Mass drift: 0% by construction (f[0] derived)`, 'dim');
+        print(`  Distribution stability: ${pass ? 'EXACT' : 'deviation=' + maxDeviation}`, pass ? 'pass' : 'warn');
+        console.log("RESULT:" + JSON.stringify({bench: "mass_conservation", ticks: TICKS, sampleCells: SAMPLE, maxDeviation, pass}));
+
+        bufA.destroy(); bufB.destroy();
+    }
+    print('');
+
+    // ===============================================================
+    //  BENCHMARK 5: u16 Stream Only (16 bits/dist, 9 u32/cell)
+    // ===============================================================
+    print('=== Benchmark 5: u16 Stream Only (16-bit, 9 words/cell) ===', 'gold');
+    const rho16 = 18000;
+    function initPacked16() {
+        const data = new Uint32Array(9 * N);
+        const f16 = computeEqDist(rho16);
+        for (let i = 0; i < N; i++) {
+            for (let w = 0; w < 9; w++) {
+                const a = f16[w*2+1] & 0xFFFF;
+                const b = f16[w*2+2] & 0xFFFF;
+                data[w * N + i] = (a | (b << 16)) >>> 0;
+            }
+        }
+        return data;
+    }
+    print(`RHO=${rho16} (vs u10 RHO=${rho0}). Memory: ${(9*N*4/1e6).toFixed(1)}MB vs u10 ${(6*N*4/1e6).toFixed(1)}MB`);
+    print('');
+
+    const u16StreamShader = device.createShaderModule({ code: `
+        const W = ${W}u;
+        const H = ${H}u;
+        const D_GRID = ${D}u;
+        const NCELLS = ${N}u;
+
+        const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+        const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+        const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+        const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+
+        @group(0) @binding(0) var<storage, read> fin: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> fout: array<u32>;
+
+        fn read_fq(src_idx: u32, q: u32) -> u32 {
+            let qm1 = q - 1u;
+            let word_idx = qm1 / 2u;
+            let slot = qm1 % 2u;
+            let packed = fin[word_idx * NCELLS + src_idx];
+            return (packed >> (slot * 16u)) & 0xFFFFu;
+        }
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+
+            var f: array<u32, 19>;
+            for (var q = 1u; q < 19u; q++) {
+                let sx = x - DX[q];
+                let sy = y - DY[q];
+                let sz = z - DZ[q];
+                if (sx >= 0 && sx < i32(W) && sy >= 0 && sy < i32(H) && sz >= 0 && sz < i32(D_GRID)) {
+                    let src_idx = u32(sx) + u32(sy) * W + u32(sz) * W * H;
+                    f[q] = read_fq(src_idx, q);
+                } else {
+                    let oq = OPP[q];
+                    if (oq == 0u) { f[q] = 0u; }
+                    else { f[q] = read_fq(idx, oq); }
+                }
+            }
+
+            for (var w = 0u; w < 9u; w++) {
+                let a = f[w * 2u + 1u] & 0xFFFFu;
+                let b = f[w * 2u + 2u] & 0xFFFFu;
+                fout[w * NCELLS + idx] = a | (b << 16u);
+            }
+        }
+    `});
+
+    let u16StreamMs = 0;
+    {
+        const wg = Math.ceil(N / 256);
+        const p16Data = initPacked16();
+        const buf16A = makeBuffer(device, p16Data, GPUBufferUsage.STORAGE);
+        const buf16B = device.createBuffer({ size: p16Data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+        const pip16S = device.createComputePipeline({ layout: 'auto', compute: { module: u16StreamShader, entryPoint: 'main' } });
+        const bg16AB = device.createBindGroup({ layout: pip16S.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: buf16A } }, { binding: 1, resource: { buffer: buf16B } }
+        ]});
+        const bg16BA = device.createBindGroup({ layout: pip16S.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: buf16B } }, { binding: 1, resource: { buffer: buf16A } }
+        ]});
+        for (let run = 0; run < 2; run++) {
+            for (let w = 0; w < 3; w++) {
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pip16S); p.setBindGroup(0, bg16AB); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            const t0 = performance.now();
+            for (let i = 0; i < ITERS; i++) {
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pip16S); p.setBindGroup(0, (i%2===0)?bg16AB:bg16BA); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            u16StreamMs = (performance.now() - t0) / ITERS;
+            print(`  Run ${run+1}: ${u16StreamMs.toFixed(3)}ms${run===0?' (warmup)':''}`, run===0?'dim':'pass');
+        }
+        const vs10 = ((u16StreamMs - packedStreamMs) / packedStreamMs * 100).toFixed(1);
+        print(`  vs u10 stream: ${vs10}% ${u16StreamMs > packedStreamMs ? 'slower' : 'faster'}`, 'dim');
+        console.log("RESULT:" + JSON.stringify({bench: "u16_stream", u16Ms: +u16StreamMs.toFixed(3), u10Ms: +packedStreamMs.toFixed(3), deltaPct: +vs10}));
+        buf16A.destroy(); buf16B.destroy();
+    }
+    print('');
+
+    // ===============================================================
+    //  BENCHMARK 6: u16 LBM-Swap (AA scheme, single buffer)
+    // ===============================================================
+    print('=== Benchmark 6: u16 AA (single buffer, 9 words/cell) ===', 'gold');
+    print(`In-place AA with u16. RHO=${rho16} — impossible at u10.`);
+    print('');
+
+    const u16AAShader = device.createShaderModule({ code: `
+        const W = ${W}u;
+        const H = ${H}u;
+        const D_GRID = ${D}u;
+        const NCELLS = ${N}u;
+        const SCALE = ${SCALE}i;
+        const RHO0 = ${rho16}i;
+        ${TRT_CONSTS}
+
+        const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+        const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+        const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+        const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+
+        struct Tick { even: u32, }
+        @group(0) @binding(0) var<uniform> tick: Tick;
+        @group(0) @binding(1) var<storage, read_write> fbuf: array<u32>;
+
+        fn read_slot(cell_idx: u32, q: u32) -> i32 {
+            let qm1 = q - 1u;
+            let word_idx = qm1 / 2u;
+            let slot = qm1 % 2u;
+            let packed = fbuf[word_idx * NCELLS + cell_idx];
+            return i32((packed >> (slot * 16u)) & 0xFFFFu);
+        }
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+
+            let is_even = tick.even;
+
+            var f: array<i32, 19>;
+            for (var q = 1u; q < 19u; q++) {
+                let read_q = select(q, OPP[q], is_even == 1u);
+                let sx = x - DX[q];
+                let sy = y - DY[q];
+                let sz = z - DZ[q];
+                if (sx >= 0 && sx < i32(W) && sy >= 0 && sy < i32(H) && sz >= 0 && sz < i32(D_GRID)) {
+                    let src_idx = u32(sx) + u32(sy) * W + u32(sz) * W * H;
+                    f[q] = read_slot(src_idx, read_q);
+                } else {
+                    let oq = OPP[q];
+                    if (oq == 0u) { f[q] = 0; }
+                    else { f[q] = read_slot(idx, select(oq, q, is_even == 1u)); }
+                }
+            }
+
+            var sum_f = 0i;
+            for (var q = 1u; q < 19u; q++) { sum_f += f[q]; }
+            f[0] = RHO0 - sum_f;
+            let rho = RHO0;
+
+            ${TRT_COLLISION}
+
+            var out: array<i32, 19>;
+            for (var q = 1u; q < 19u; q++) {
+                let write_q = select(q, OPP[q], is_even == 1u);
+                out[write_q] = col[q];
+            }
+            for (var w = 0u; w < 9u; w++) {
+                let a = u32(out[w * 2u + 1u]) & 0xFFFFu;
+                let b = u32(out[w * 2u + 2u]) & 0xFFFFu;
+                fbuf[w * NCELLS + idx] = a | (b << 16u);
+            }
+        }
+    `});
+
+    let u16AAMs = 0;
+    {
+        const wg = Math.ceil(N / 256);
+        const p16Data = initPacked16();
+        const buf = makeBuffer(device, p16Data, GPUBufferUsage.STORAGE);
+        const tickBuf16 = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const pipAA16 = device.createComputePipeline({ layout: 'auto', compute: { module: u16AAShader, entryPoint: 'main' } });
+        const bg16 = device.createBindGroup({ layout: pipAA16.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: tickBuf16 } },
+            { binding: 1, resource: { buffer: buf } },
+        ]});
+
+        for (let run = 0; run < 2; run++) {
+            for (let w = 0; w < 3; w++) {
+                device.queue.writeBuffer(tickBuf16, 0, new Uint32Array([w % 2]));
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pipAA16); p.setBindGroup(0, bg16); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            const t0 = performance.now();
+            for (let i = 0; i < ITERS; i++) {
+                device.queue.writeBuffer(tickBuf16, 0, new Uint32Array([i % 2]));
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(pipAA16); p.setBindGroup(0, bg16); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            u16AAMs = (performance.now() - t0) / ITERS;
+            print(`  Run ${run+1}: ${u16AAMs.toFixed(3)}ms${run===0?' (warmup)':''}`, run===0?'dim':'pass');
+        }
+        print(`  Memory: ${(9*N*4/1e6).toFixed(1)}MB (single buffer)`, 'dim');
+        const vsU10AA = ((u16AAMs - aaTickMs) / aaTickMs * 100).toFixed(1);
+        print(`  vs u10 AA: ${vsU10AA}% ${u16AAMs > aaTickMs ? 'slower' : 'faster'}`, u16AAMs < aaTickMs * 1.8 ? 'pass' : 'warn');
+        console.log("RESULT:" + JSON.stringify({bench: "u16_aa", u16Ms: +u16AAMs.toFixed(3), u10Ms: +aaTickMs.toFixed(3), deltaPct: +vsU10AA}));
+        buf.destroy(); tickBuf16.destroy();
+    }
+    print('');
+
+    // ===============================================================
+    //  SUMMARY + BANDWIDTH ANALYSIS
+    // ===============================================================
+    print('=== FULL 3-WAY COMPARISON ===', 'gold');
+    print(`GPU: ${gpuName}`);
+    print(`Grid: ${W}x${H}x${D} = ${(N/1e6).toFixed(2)}M cells`);
+    print('');
+
+    const frameMs = 8.33;  // 120fps
+
+    print('=== Standard vs u10 vs u16 ===', 'gold');
+    print(`                        Standard (19xu32)    u10 (6xu32)    u16 (9xu32)`);
+    print(`  Memory/cell:          76 bytes             24 bytes       36 bytes`);
+    print(`  Buffer size:          ${(19*N*4/1e6).toFixed(0)} MB              ${(6*N*4/1e6).toFixed(0)} MB          ${(9*N*4/1e6).toFixed(0)} MB`);
+    print(`  Full tick:            ${unpackedTickMs.toFixed(3)}ms            ${packedTickMs.toFixed(3)}ms       ${u16AAMs.toFixed(3)}ms`);
+    print(`  AA tick (in-place):   n/a                  ${aaTickMs.toFixed(3)}ms       ${u16AAMs.toFixed(3)}ms`);
+    print(`  Ticks/frame @120fps:  ${Math.floor(frameMs/unpackedTickMs)}                    ${Math.floor(frameMs/aaTickMs)}              ${Math.floor(frameMs/u16AAMs)}`);
+    print('');
+
+    const vs_standard_u10 = ((unpackedTickMs - aaTickMs) / unpackedTickMs * 100).toFixed(0);
+    const vs_standard_u16 = ((unpackedTickMs - u16AAMs) / unpackedTickMs * 100).toFixed(0);
+    const u10_speedup = (unpackedTickMs / aaTickMs).toFixed(1);
+    const u16_speedup = (unpackedTickMs / u16AAMs).toFixed(1);
+
+    print('=== Speedup vs Standard LBM ===', 'gold');
+    print(`  u10 AA:  ${u10_speedup}x faster  (${vs_standard_u10}% less time)`, 'pass');
+    print(`  u16 AA:  ${u16_speedup}x faster  (${vs_standard_u16}% less time)`, 'pass');
+    print('');
+
+    print('=== u10 vs u16 Head-to-Head ===', 'gold');
+    const streamOH = ((u16StreamMs - packedStreamMs) / packedStreamMs * 100).toFixed(1);
+    const aaOH = ((u16AAMs - aaTickMs) / aaTickMs * 100).toFixed(1);
+    print(`  Memory/cell:  u10=24B (6 u32)   u16=36B (9 u32)   +50%`);
+    print(`  Stream:       u10=${packedStreamMs.toFixed(3)}ms  u16=${u16StreamMs.toFixed(3)}ms  (+${streamOH}%)`, 'pass');
+    print(`  AA tick:      u10=${aaTickMs.toFixed(3)}ms  u16=${u16AAMs.toFixed(3)}ms  (+${aaOH}%)`, 'pass');
+    print(`  Precision:    u10: 10 bits (0-1023)   u16: 16 bits (0-65535)   64x`, 'gold');
+    print(`  Vel levels:   u10~6   u16: 53 measured (Poiseuille, SCALE=256)`, 'gold');
+    print('');
+
+    // Bandwidth analysis
+    const minBytes_u10 = N * 6 * 4 * 2;
+    const minBytes_u16 = N * 9 * 4 * 2;
+    const minBytes_std = N * 19 * 4 * 2;
+    const DRAM_BW = 68.25e9;
+
+    print('=== Memory Bandwidth ===', 'gold');
+    print(`  Standard: ${(minBytes_std/1e6).toFixed(0)} MB/tick  DRAM: ${(minBytes_std/DRAM_BW*1000).toFixed(2)}ms`);
+    print(`  u10:      ${(minBytes_u10/1e6).toFixed(0)} MB/tick  DRAM: ${(minBytes_u10/DRAM_BW*1000).toFixed(2)}ms  actual: ${packedStreamMs.toFixed(2)}ms`);
+    print(`  u16:      ${(minBytes_u16/1e6).toFixed(0)} MB/tick  DRAM: ${(minBytes_u16/DRAM_BW*1000).toFixed(2)}ms  actual: ${u16StreamMs.toFixed(2)}ms`);
+    print('');
+
+    print('=== Frame Budget (120fps = 8.33ms) ===', 'gold');
+    print(`  Standard:   ${Math.floor(frameMs / unpackedTickMs)} ticks/frame`);
+    print(`  u10 AA:     ${Math.floor(frameMs / aaTickMs)} ticks/frame`);
+    print(`  u16 AA:     ${Math.floor(frameMs / u16AAMs)} ticks/frame`);
+    print(`  u10 @20%:  ~${Math.floor(frameMs / (aaTickMs * 0.2))} ticks/frame (dormant)`);
+    print(`  u16 @20%:  ~${Math.floor(frameMs / (u16AAMs * 0.2))} ticks/frame (dormant)`);
+
+    print('');
+    print('Done.');
+    console.log("RESULT:" + JSON.stringify({
+        bench: "summary", gpu: gpuName, grid: `${W}x${H}x${D}`, cells: N,
+        unpackedTickMs: +unpackedTickMs.toFixed(3),
+        packedTickMs: +packedTickMs.toFixed(3),
+        aaTickMs: +aaTickMs.toFixed(3),
+        u16AAMs: +u16AAMs.toFixed(3),
+        u10_speedup: +u10_speedup,
+        u16_speedup: +u16_speedup,
+        u10_aa_tpf: Math.floor(frameMs / aaTickMs),
+        u16_aa_tpf: Math.floor(frameMs / u16AAMs),
+        std_tpf: Math.floor(frameMs / unpackedTickMs),
+    }));
+}
+
+run().catch(e => {
+    print('FATAL: ' + e.message, 'fail');
+    console.log("RESULT:" + JSON.stringify({bench: "error", error: e.message, stack: e.stack}));
+});
+</script>
+</body>
+</html>

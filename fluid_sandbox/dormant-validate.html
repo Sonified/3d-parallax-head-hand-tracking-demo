@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Dormant Cell Skip: Physics Validation</title>
+<style>body{background:#0a0a1a;color:#ccc;font-family:'SF Mono',monospace;padding:24px;font-size:13px}
+pre{background:#111;padding:16px;border-radius:8px;overflow-x:auto;line-height:1.5}
+.pass{color:#4fc3f7}.fail{color:#f44}.gold{color:#ffd700}.dim{color:#666}.warn{color:#ff9800}
+h2{color:#4fc3f7;margin-bottom:4px}
+</style>
+</head><body>
+<h2>Dormant Cell Skip: Physics Correctness Validation</h2>
+<pre id="log">Initializing WebGPU...</pre>
+<script type="module">
+const log = document.getElementById('log');
+const print = (s, cls) => { const span = document.createElement('span'); span.className = cls||''; span.textContent = s+'\n'; log.appendChild(span); log.scrollTop = log.scrollHeight; };
+log.textContent = '';
+
+const SCALE = 1024;
+const ON1 = 1, OD1 = 75;
+const ON2 = 8, OD2 = 5;
+const UMAX = Math.round(SCALE * 0.75);
+const FORCE_VAL = 0;
+const rho16 = 18000;
+const W_GRID = 64, H_GRID = 64, D_GRID = 48;
+const N = W_GRID * H_GRID * D_GRID;
+const DORMANT_THRESHOLD = 5;
+
+const CONSTS = `
+    const W: u32 = ${W_GRID}u;
+    const H: u32 = ${H_GRID}u;
+    const D_GRID: u32 = ${D_GRID}u;
+    const NCELLS: u32 = ${N}u;
+    const SCALE_I: i32 = ${SCALE}i;
+    const RHO0: i32 = ${rho16}i;
+    const ON1: i32 = ${ON1}i;
+    const OD1: i32 = ${OD1}i;
+    const ON2: i32 = ${ON2}i;
+    const OD2: i32 = ${OD2}i;
+    const UMAX: i32 = ${UMAX}i;
+    const FORCE_BODY: i32 = ${FORCE_VAL}i;
+    const DORMANT_THRESH: i32 = ${DORMANT_THRESHOLD}i;
+    const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+    const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+    const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+    const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+`;
+
+function pairBlock(a, b, w, cuExpr) {
+    return `
+    {
+        let cu = ${cuExpr};
+        let base = ${w} * rho / 36;
+        let linear = ${w} * rho * 3 * cu / (36 * SCALE_I);
+        let quad = linear * 3 * cu / (2 * SCALE_I);
+        let usq_c = ${w} * rho * 3 / 72;
+        let usq_t = usq_c * usq / (SCALE_I * SCALE_I);
+        let feq_a = base + linear + quad - usq_t;
+        let feq_b = feq_a - 2 * linear;
+        let fneq_a = f[${a}] - feq_a;
+        let fneq_b = f[${b}] - feq_b;
+        max_neq = max(max_neq, abs(fneq_a));
+        max_neq = max(max_neq, abs(fneq_b));
+        let fneq_p = (fneq_a + fneq_b) / 2;
+        let fneq_m = (fneq_a - fneq_b) / 2;
+        let sym  = (OD1 - ON1) * fneq_p / OD1;
+        let asym = (OD2 - ON2) * fneq_m / OD2;
+        col[${a}] = feq_a + sym + asym;
+        col[${b}] = feq_b + sym - asym;
+    }`;
+}
+
+const COLLISION_BODY = `
+    var jx: i32 = 0; var jy: i32 = 0; var jz: i32 = 0;
+    for (var q = 1u; q < 19u; q++) {
+        jx += DX[q] * f[q];
+        jy += DY[q] * f[q];
+        jz += DZ[q] * f[q];
+    }
+    jx += FORCE_BODY;
+    var ux = clamp(jx * SCALE_I / rho, -UMAX, UMAX);
+    var uy = clamp(jy * SCALE_I / rho, -UMAX, UMAX);
+    var uz = clamp(jz * SCALE_I / rho, -UMAX, UMAX);
+    let usq = ux*ux + uy*uy + uz*uz;
+    var col: array<i32, 19>;
+    var max_neq: i32 = 0;
+    ${pairBlock(1, 2, 2, 'uy')}
+    ${pairBlock(3, 4, 2, 'ux')}
+    ${pairBlock(5, 6, 2, 'uz')}
+    ${pairBlock(7, 8, 1, 'ux + uy')}
+    ${pairBlock(9, 10, 1, 'ux - uy')}
+    ${pairBlock(11, 12, 1, 'uy + uz')}
+    ${pairBlock(13, 14, 1, 'uy - uz')}
+    ${pairBlock(15, 16, 1, 'ux + uz')}
+    ${pairBlock(17, 18, 1, 'ux - uz')}
+    var colSum: i32 = 0;
+    for (var q = 1u; q < 19u; q++) { colSum += col[q]; }
+    col[0] = rho - colSum;
+`;
+
+const READ_SLOT_FN = `
+    fn read_slot(cell_idx: u32, q: u32) -> i32 {
+        let qm1 = q - 1u;
+        let word_idx = qm1 / 2u;
+        let slot = qm1 % 2u;
+        let packed = fbuf[word_idx * NCELLS + cell_idx];
+        return i32((packed >> (slot * 16u)) & 0xFFFFu);
+    }
+`;
+
+const GATHER_AA = `
+    var f: array<i32, 19>;
+    for (var q = 1u; q < 19u; q++) {
+        let read_q = select(q, OPP[q], is_even == 1u);
+        let sx = x - DX[q];
+        let sy = y - DY[q];
+        let sz = z - DZ[q];
+        if (sx >= 0 && sx < i32(W) && sy >= 0 && sy < i32(H) && sz >= 0 && sz < i32(D_GRID)) {
+            let src_idx = u32(sx) + u32(sy) * W + u32(sz) * W * H;
+            f[q] = read_slot(src_idx, read_q);
+        } else {
+            let oq = OPP[q];
+            if (oq == 0u) { f[q] = 0; }
+            else { f[q] = read_slot(idx, select(oq, q, is_even == 1u)); }
+        }
+    }
+    var sum_f = 0i;
+    for (var q = 1u; q < 19u; q++) { sum_f += f[q]; }
+    f[0] = RHO0 - sum_f;
+    let rho = RHO0;
+`;
+
+const WRITEBACK_AA = `
+    var out: array<i32, 19>;
+    for (var q = 1u; q < 19u; q++) {
+        let write_q = select(q, OPP[q], is_even == 1u);
+        out[write_q] = col[q];
+    }
+    for (var w = 0u; w < 9u; w++) {
+        let a = u32(out[w * 2u + 1u]) & 0xFFFFu;
+        let b = u32(out[w * 2u + 2u]) & 0xFFFFu;
+        fbuf[w * NCELLS + idx] = a | (b << 16u);
+    }
+`;
+
+// Baseline: all cells, no flags
+function makeBaselineShader() {
+    return `
+        ${CONSTS}
+        struct Tick { even: u32, }
+        @group(0) @binding(0) var<uniform> tick: Tick;
+        @group(0) @binding(1) var<storage, read_write> fbuf: array<u32>;
+        ${READ_SLOT_FN}
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+            let is_even = tick.even;
+            ${GATHER_AA}
+            ${COLLISION_BODY}
+            ${WRITEBACK_AA}
+        }
+    `;
+}
+
+// Dormant: all cells dispatched, but skip if self + neighbors dormant
+function makeDormantShader() {
+    return `
+        ${CONSTS}
+        struct Tick { even: u32, }
+        @group(0) @binding(0) var<uniform> tick: Tick;
+        @group(0) @binding(1) var<storage, read_write> fbuf: array<u32>;
+        @group(0) @binding(2) var<storage, read_write> flags: array<u32>;
+        ${READ_SLOT_FN}
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+
+            if (flags[idx] == 1u) {
+                var all_dormant = true;
+                for (var q = 1u; q < 19u; q++) {
+                    let nx = x + DX[q];
+                    let ny = y + DY[q];
+                    let nz = z + DZ[q];
+                    if (nx >= 0 && nx < i32(W) && ny >= 0 && ny < i32(H) && nz >= 0 && nz < i32(D_GRID)) {
+                        let nidx = u32(nx) + u32(ny) * W + u32(nz) * W * H;
+                        if (flags[nidx] != 1u) { all_dormant = false; break; }
+                    }
+                }
+                if (all_dormant) { return; }
+            }
+
+            let is_even = tick.even;
+            ${GATHER_AA}
+            ${COLLISION_BODY}
+            flags[idx] = select(0u, 1u, max_neq <= DORMANT_THRESH);
+            ${WRITEBACK_AA}
+        }
+    `;
+}
+
+// Early exit: bail after momentum check if activity below threshold
+function makeEarlyExitShader() {
+    return `
+        ${CONSTS}
+        struct Tick { even: u32, }
+        @group(0) @binding(0) var<uniform> tick: Tick;
+        @group(0) @binding(1) var<storage, read_write> fbuf: array<u32>;
+        ${READ_SLOT_FN}
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+            let is_even = tick.even;
+            ${GATHER_AA}
+            var jx: i32 = 0; var jy: i32 = 0; var jz: i32 = 0;
+            for (var q = 1u; q < 19u; q++) {
+                jx += DX[q] * f[q];
+                jy += DY[q] * f[q];
+                jz += DZ[q] * f[q];
+            }
+            jx += FORCE_BODY;
+            let activity = abs(jx) + abs(jy) + abs(jz);
+            if (activity < DORMANT_THRESH) { return; }
+            var ux = clamp(jx * SCALE_I / rho, -UMAX, UMAX);
+            var uy = clamp(jy * SCALE_I / rho, -UMAX, UMAX);
+            var uz = clamp(jz * SCALE_I / rho, -UMAX, UMAX);
+            let usq = ux*ux + uy*uy + uz*uz;
+            var col: array<i32, 19>;
+            var max_neq: i32 = 0;
+            ${pairBlock(1, 2, 2, 'uy')}
+            ${pairBlock(3, 4, 2, 'ux')}
+            ${pairBlock(5, 6, 2, 'uz')}
+            ${pairBlock(7, 8, 1, 'ux + uy')}
+            ${pairBlock(9, 10, 1, 'ux - uy')}
+            ${pairBlock(11, 12, 1, 'uy + uz')}
+            ${pairBlock(13, 14, 1, 'uy - uz')}
+            ${pairBlock(15, 16, 1, 'ux + uz')}
+            ${pairBlock(17, 18, 1, 'ux - uz')}
+            var colSum: i32 = 0;
+            for (var q = 1u; q < 19u; q++) { colSum += col[q]; }
+            col[0] = rho - colSum;
+            ${WRITEBACK_AA}
+        }
+    `;
+}
+
+// Force injection
+function makeForceShader() {
+    return `
+        ${CONSTS}
+        struct ForceParams {
+            cx: f32, cy: f32, cz: f32, radius: f32,
+            fx: i32, fy: i32, fz: i32, pad: u32,
+        }
+        @group(0) @binding(0) var<storage, read_write> fbuf: array<u32>;
+        @group(0) @binding(1) var<uniform> params: ForceParams;
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+            let x = f32(idx % W);
+            let y = f32((idx / W) % H);
+            let z = f32(idx / (W * H));
+            let dx = x - params.cx;
+            let dy = y - params.cy;
+            let dz = z - params.cz;
+            let dist2 = dx*dx + dy*dy + dz*dz;
+            let r2 = params.radius * params.radius;
+            if (dist2 > r2) { return; }
+            let strength = exp(-3.0 * dist2 / r2);
+            let force_x = i32(f32(params.fx) * strength);
+            let force_y = i32(f32(params.fy) * strength);
+            let force_z = i32(f32(params.fz) * strength);
+            for (var w = 0u; w < 9u; w++) {
+                let qa = w * 2u + 1u;
+                let qb = w * 2u + 2u;
+                let packed = fbuf[w * NCELLS + idx];
+                var va = i32(packed & 0xFFFFu);
+                var vb = i32((packed >> 16u) & 0xFFFFu);
+                let dqa = DX[qa] * force_x + DY[qa] * force_y + DZ[qa] * force_z;
+                let dqb = DX[qb] * force_x + DY[qb] * force_y + DZ[qb] * force_z;
+                va = clamp(va + dqa / 6, 0, 65535);
+                vb = clamp(vb + dqb / 6, 0, 65535);
+                fbuf[w * NCELLS + idx] = u32(va) | (u32(vb) << 16u);
+            }
+        }
+    `;
+}
+
+// Force injection that also wakes cells
+function makeForceWakeShader() {
+    return `
+        ${CONSTS}
+        struct ForceParams {
+            cx: f32, cy: f32, cz: f32, radius: f32,
+            fx: i32, fy: i32, fz: i32, pad: u32,
+        }
+        @group(0) @binding(0) var<storage, read_write> fbuf: array<u32>;
+        @group(0) @binding(1) var<uniform> params: ForceParams;
+        @group(0) @binding(2) var<storage, read_write> flags: array<u32>;
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+            let x = f32(idx % W);
+            let y = f32((idx / W) % H);
+            let z = f32(idx / (W * H));
+            let dx = x - params.cx;
+            let dy = y - params.cy;
+            let dz = z - params.cz;
+            let dist2 = dx*dx + dy*dy + dz*dz;
+            let r2 = params.radius * params.radius;
+            if (dist2 > r2) { return; }
+            let strength = exp(-3.0 * dist2 / r2);
+            let force_x = i32(f32(params.fx) * strength);
+            let force_y = i32(f32(params.fy) * strength);
+            let force_z = i32(f32(params.fz) * strength);
+            for (var w = 0u; w < 9u; w++) {
+                let qa = w * 2u + 1u;
+                let qb = w * 2u + 2u;
+                let packed = fbuf[w * NCELLS + idx];
+                var va = i32(packed & 0xFFFFu);
+                var vb = i32((packed >> 16u) & 0xFFFFu);
+                let dqa = DX[qa] * force_x + DY[qa] * force_y + DZ[qa] * force_z;
+                let dqb = DX[qb] * force_x + DY[qb] * force_y + DZ[qb] * force_z;
+                va = clamp(va + dqa / 6, 0, 65535);
+                vb = clamp(vb + dqb / 6, 0, 65535);
+                fbuf[w * NCELLS + idx] = u32(va) | (u32(vb) << 16u);
+            }
+            flags[idx] = 0u;
+        }
+    `;
+}
+
+// Diff shader: compute per-cell max absolute difference between two buffers
+function makeDiffShader() {
+    return `
+        ${CONSTS}
+        @group(0) @binding(0) var<storage, read> bufA: array<u32>;
+        @group(0) @binding(1) var<storage, read> bufB: array<u32>;
+        @group(0) @binding(2) var<storage, read_write> diffOut: array<u32>;
+        @group(0) @binding(3) var<storage, read_write> stats: array<atomic<u32>>;
+
+        // stats[0] = max diff across all cells and directions
+        // stats[1] = count of cells with any diff > 0
+        // stats[2] = total diff (sum of all diffs, saturating)
+        // stats[3] = max diff cell index
+        // stats[4] = count of cells with diff > DORMANT_THRESH
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+
+            var cell_max_diff: u32 = 0u;
+            var cell_total_diff: u32 = 0u;
+
+            for (var w = 0u; w < 9u; w++) {
+                let packed_a = bufA[w * NCELLS + idx];
+                let packed_b = bufB[w * NCELLS + idx];
+
+                let va_lo = packed_a & 0xFFFFu;
+                let va_hi = (packed_a >> 16u) & 0xFFFFu;
+                let vb_lo = packed_b & 0xFFFFu;
+                let vb_hi = (packed_b >> 16u) & 0xFFFFu;
+
+                let diff_lo = select(vb_lo - va_lo, va_lo - vb_lo, va_lo > vb_lo);
+                let diff_hi = select(vb_hi - va_hi, va_hi - vb_hi, va_hi > vb_hi);
+
+                cell_max_diff = max(cell_max_diff, max(diff_lo, diff_hi));
+                cell_total_diff += diff_lo + diff_hi;
+            }
+
+            diffOut[idx] = cell_max_diff;
+
+            // Update global stats
+            atomicMax(&stats[0], cell_max_diff);
+            if (cell_max_diff > 0u) {
+                atomicAdd(&stats[1], 1u);
+            }
+            atomicAdd(&stats[2], min(cell_total_diff, 65535u));
+            if (cell_max_diff > ${DORMANT_THRESHOLD}u) {
+                atomicAdd(&stats[4], 1u);
+            }
+        }
+    `;
+}
+
+async function run() {
+    const adapter = await navigator.gpu?.requestAdapter();
+    if (!adapter) { print('No WebGPU adapter', 'fail'); return; }
+    const device = await adapter.requestDevice({
+        requiredLimits: {
+            maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+            maxBufferSize: adapter.limits.maxBufferSize
+        }
+    });
+    print(`GPU: ${adapter.info?.description || adapter.info?.vendor || 'unknown'}`);
+    print(`Grid: ${W_GRID}x${H_GRID}x${D_GRID} = ${(N/1e6).toFixed(3)}M cells (smaller grid for validation)`);
+    print(`Dormant threshold: max|fneq| <= ${DORMANT_THRESHOLD}`);
+    print('');
+    print('Test: run identical force injection + N ticks on baseline, dormant-flag, and early-exit,', 'dim');
+    print('then compare every distribution value against baseline.', 'dim');
+    print('');
+
+    // Exact integer equilibrium at zero velocity: feq[q] = W[q] * rho / 36
+    // W[q]=2 for face, W[q]=1 for edge, W[0]=12 (but f[0] = rho - sum)
+    const fInit = new Array(19);
+    const feqFace = Math.floor(2 * rho16 / 36);  // = 1000
+    const feqEdge = Math.floor(1 * rho16 / 36);  // = 500
+    let initSum = 0;
+    for (let q = 1; q <= 6; q++) { fInit[q] = feqFace; initSum += fInit[q]; }
+    for (let q = 7; q <= 18; q++) { fInit[q] = feqEdge; initSum += fInit[q]; }
+    fInit[0] = rho16 - initSum;
+
+    const initData = new Uint32Array(9 * N);
+    for (let i = 0; i < N; i++) {
+        for (let w = 0; w < 9; w++) {
+            const a = fInit[w*2+1] & 0xFFFF;
+            const b = fInit[w*2+2] & 0xFFFF;
+            initData[w * N + i] = (a | (b << 16)) >>> 0;
+        }
+    }
+
+    const STORAGE = GPUBufferUsage.STORAGE;
+    const UNIFORM = GPUBufferUsage.UNIFORM;
+    const COPY_DST = GPUBufferUsage.COPY_DST;
+    const COPY_SRC = GPUBufferUsage.COPY_SRC;
+    const MAP_READ = GPUBufferUsage.MAP_READ;
+    const wg = Math.ceil(N / 256);
+
+    // Compile shaders
+    async function compile(name, code) {
+        const mod = device.createShaderModule({ code });
+        const info = await mod.getCompilationInfo();
+        const errs = info.messages.filter(m => m.type === 'error');
+        if (errs.length > 0) { for (const e of errs) print(`  ${name}: ${e.message}`, 'fail'); return null; }
+        return mod;
+    }
+
+    const baselineMod  = await compile('Baseline', makeBaselineShader());
+    const dormantMod   = await compile('Dormant', makeDormantShader());
+    const earlyExitMod = await compile('EarlyExit', makeEarlyExitShader());
+    const forceMod     = await compile('Force', makeForceShader());
+    const forceWakeMod = await compile('ForceWake', makeForceWakeShader());
+    const diffMod      = await compile('Diff', makeDiffShader());
+    if (!baselineMod || !dormantMod || !earlyExitMod || !forceMod || !forceWakeMod || !diffMod) return;
+
+    const baselinePipeline  = device.createComputePipeline({ layout: 'auto', compute: { module: baselineMod, entryPoint: 'main' } });
+    const dormantPipeline   = device.createComputePipeline({ layout: 'auto', compute: { module: dormantMod, entryPoint: 'main' } });
+    const earlyExitPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: earlyExitMod, entryPoint: 'main' } });
+    const forcePipeline     = device.createComputePipeline({ layout: 'auto', compute: { module: forceMod, entryPoint: 'main' } });
+    const forceWakePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: forceWakeMod, entryPoint: 'main' } });
+    const diffPipeline      = device.createComputePipeline({ layout: 'auto', compute: { module: diffMod, entryPoint: 'main' } });
+
+    // Test scenarios
+    const tests = [
+        { label: 'Small pulse, 20 ticks',     radius: 6,  fx: 150, fy: 0,  fz: 0,   ticks: 20 },
+        { label: 'Medium blast, 50 ticks',     radius: 12, fx: 100, fy: 50, fz: 0,   ticks: 50 },
+        { label: 'Strong 3D force, 100 ticks', radius: 8,  fx: 200, fy: 100, fz: 150, ticks: 100 },
+        { label: 'Wake front test, 200 ticks', radius: 4,  fx: 300, fy: 0,   fz: 0,   ticks: 200 },
+    ];
+
+    async function runDiff(label, bufA, bufB, cx, cy, cz, test) {
+        const diffOutBuf = device.createBuffer({ size: N * 4, usage: STORAGE | COPY_SRC });
+        const statsBuf = device.createBuffer({ size: 5 * 4, usage: STORAGE | COPY_DST | COPY_SRC });
+        device.queue.writeBuffer(statsBuf, 0, new Uint32Array([0, 0, 0, 0, 0]));
+
+        const diffBG = device.createBindGroup({ layout: diffPipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: bufA } },
+            { binding: 1, resource: { buffer: bufB } },
+            { binding: 2, resource: { buffer: diffOutBuf } },
+            { binding: 3, resource: { buffer: statsBuf } },
+        ]});
+
+        {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass();
+            p.setPipeline(diffPipeline); p.setBindGroup(0, diffBG); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+            await device.queue.onSubmittedWorkDone();
+        }
+
+        const statsRead = device.createBuffer({ size: 5 * 4, usage: MAP_READ | COPY_DST });
+        {
+            const enc = device.createCommandEncoder();
+            enc.copyBufferToBuffer(statsBuf, 0, statsRead, 0, 5 * 4);
+            device.queue.submit([enc.finish()]);
+            await device.queue.onSubmittedWorkDone();
+        }
+        await statsRead.mapAsync(GPUMapMode.READ);
+        const stats = new Uint32Array(statsRead.getMappedRange().slice(0));
+        statsRead.unmap();
+
+        const maxDiff = stats[0];
+        const cellsWithDiff = stats[1];
+        const totalDiff = stats[2];
+        const cellsAboveThresh = stats[4];
+        const pctDiff = (100 * cellsWithDiff / N).toFixed(2);
+
+        print(`  [${label}]`, 'gold');
+        if (maxDiff === 0) {
+            print(`    PERFECT MATCH: zero difference across all ${N.toLocaleString()} cells x 18 directions`, 'pass');
+        } else {
+            print(`    Max diff:         ${maxDiff} (distribution units)`, maxDiff <= DORMANT_THRESHOLD ? 'warn' : 'fail');
+            print(`    Cells with diff:  ${cellsWithDiff.toLocaleString()} / ${N.toLocaleString()} (${pctDiff}%)`, 'warn');
+            print(`    Cells > threshold: ${cellsAboveThresh.toLocaleString()}`, cellsAboveThresh === 0 ? 'pass' : 'fail');
+            print(`    Total diff sum:   ${totalDiff.toLocaleString()}`, 'dim');
+
+            if (cellsWithDiff > 0 && cellsWithDiff <= 1000) {
+                const diffRead = device.createBuffer({ size: N * 4, usage: MAP_READ | COPY_DST });
+                const enc = device.createCommandEncoder();
+                enc.copyBufferToBuffer(diffOutBuf, 0, diffRead, 0, N * 4);
+                device.queue.submit([enc.finish()]);
+                await device.queue.onSubmittedWorkDone();
+                await diffRead.mapAsync(GPUMapMode.READ);
+                const diffs = new Uint32Array(diffRead.getMappedRange().slice(0));
+                diffRead.unmap();
+                diffRead.destroy();
+
+                let topCells = [];
+                for (let i = 0; i < N; i++) {
+                    if (diffs[i] > 0) {
+                        const x = i % W_GRID;
+                        const y = Math.floor(i / W_GRID) % H_GRID;
+                        const z = Math.floor(i / (W_GRID * H_GRID));
+                        const dist = Math.sqrt((x-cx)**2 + (y-cy)**2 + (z-cz)**2);
+                        topCells.push({ i, x, y, z, diff: diffs[i], dist: dist.toFixed(1) });
+                    }
+                }
+                topCells.sort((a, b) => b.diff - a.diff);
+                print(`    Top diff locations (distance from center):`, 'dim');
+                for (const c of topCells.slice(0, 5)) {
+                    print(`      cell (${c.x},${c.y},${c.z}) diff=${c.diff} dist=${c.dist}`, 'dim');
+                }
+                if (topCells.length > 5) print(`      ... and ${topCells.length - 5} more`, 'dim');
+            }
+        }
+
+        const result = { label, maxDiff, cellsWithDiff, cellsAboveThresh, totalDiff };
+        console.log("RESULT:" + JSON.stringify(result));
+        diffOutBuf.destroy(); statsBuf.destroy(); statsRead.destroy();
+        return result;
+    }
+
+    // Run one approach in complete isolation: init, force, N ticks, return final buffer copy
+    async function runIsolated(label, pipeline, needsFlags, test) {
+        const fbufSize = initData.byteLength;
+        const fbuf = device.createBuffer({ size: fbufSize, usage: STORAGE | COPY_DST | COPY_SRC });
+        device.queue.writeBuffer(fbuf, 0, initData);
+        const tickBuf = device.createBuffer({ size: 4, usage: UNIFORM | COPY_DST });
+        const forceParamsBuf = device.createBuffer({ size: 32, usage: UNIFORM | COPY_DST });
+
+        const cx = W_GRID / 2, cy = H_GRID / 2, cz = D_GRID / 2;
+        const fd = new ArrayBuffer(32);
+        const fv = new DataView(fd);
+        fv.setFloat32(0, cx, true); fv.setFloat32(4, cy, true); fv.setFloat32(8, cz, true);
+        fv.setFloat32(12, test.radius, true);
+        fv.setInt32(16, test.fx, true); fv.setInt32(20, test.fy, true); fv.setInt32(24, test.fz, true);
+        device.queue.writeBuffer(forceParamsBuf, 0, fd);
+
+        let flagsBuf = null;
+        if (needsFlags) {
+            flagsBuf = device.createBuffer({ size: N * 4, usage: STORAGE | COPY_DST });
+            device.queue.writeBuffer(flagsBuf, 0, new Uint32Array(N).fill(1));
+        }
+
+        // Bind groups for collision
+        const entries = [
+            { binding: 0, resource: { buffer: tickBuf } },
+            { binding: 1, resource: { buffer: fbuf } },
+        ];
+        if (needsFlags) entries.push({ binding: 2, resource: { buffer: flagsBuf } });
+        const collisionBG = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+
+        // Force injection
+        if (needsFlags) {
+            const forceBG = device.createBindGroup({ layout: forceWakePipeline.getBindGroupLayout(0), entries: [
+                { binding: 0, resource: { buffer: fbuf } },
+                { binding: 1, resource: { buffer: forceParamsBuf } },
+                { binding: 2, resource: { buffer: flagsBuf } },
+            ]});
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass();
+            p.setPipeline(forceWakePipeline); p.setBindGroup(0, forceBG); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        } else {
+            const forceBG = device.createBindGroup({ layout: forcePipeline.getBindGroupLayout(0), entries: [
+                { binding: 0, resource: { buffer: fbuf } },
+                { binding: 1, resource: { buffer: forceParamsBuf } },
+            ]});
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass();
+            p.setPipeline(forcePipeline); p.setBindGroup(0, forceBG); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+
+        // Run N ticks
+        for (let t = 0; t < test.ticks; t++) {
+            device.queue.writeBuffer(tickBuf, 0, new Uint32Array([t % 2]));
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass();
+            p.setPipeline(pipeline); p.setBindGroup(0, collisionBG); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+        }
+        await device.queue.onSubmittedWorkDone();
+
+        // Copy result to a clean buffer for later diffing
+        const result = device.createBuffer({ size: fbufSize, usage: STORAGE | COPY_DST | COPY_SRC });
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(fbuf, 0, result, 0, fbufSize);
+        device.queue.submit([enc.finish()]);
+        await device.queue.onSubmittedWorkDone();
+
+        // Cleanup working buffers
+        fbuf.destroy(); tickBuf.destroy(); forceParamsBuf.destroy();
+        if (flagsBuf) flagsBuf.destroy();
+
+        print(`    ${label}: done (${test.ticks} ticks)`, 'dim');
+        return result;
+    }
+
+    for (const test of tests) {
+        print(`--- ${test.label} (r=${test.radius}, ${test.ticks} ticks) ---`, 'gold');
+        const cx = W_GRID / 2, cy = H_GRID / 2, cz = D_GRID / 2;
+
+        // Each approach runs in complete isolation
+        print(`  Running...`, 'dim');
+        const baselineResult = await runIsolated('Baseline', baselinePipeline, false, test);
+        const dormantResult  = await runIsolated('Dormant-flag', dormantPipeline, true, test);
+        const earlyResult    = await runIsolated('Early-exit', earlyExitPipeline, false, test);
+
+        // Now diff against baseline
+        await runDiff('Dormant-flag vs Baseline', baselineResult, dormantResult, cx, cy, cz, test);
+        await runDiff('Early-exit vs Baseline', baselineResult, earlyResult, cx, cy, cz, test);
+
+        baselineResult.destroy(); dormantResult.destroy(); earlyResult.destroy();
+        print('');
+    }
+
+    print('Done.');
+}
+
+run().catch(e => {
+    print('FATAL: ' + e.message, 'fail');
+    console.error(e);
+    console.log("RESULT:" + JSON.stringify({error: e.message}));
+});
+</script>
+</body></html>

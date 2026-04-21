@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>u10 TRT Batched Sweep</title>
+<style>
+body{background:#0a0a1a;color:#ccc;font-family:'SF Mono',monospace;padding:20px;font-size:12px}
+pre{background:#111;padding:12px;border-radius:6px;overflow-x:auto;line-height:1.4;max-height:600px;overflow-y:auto}
+.pass{color:#4fc3f7}.fail{color:#f44}.gold{color:#ffd700}.dim{color:#666}.warn{color:#fa0}
+</style>
+</head><body>
+<h2>u10 TRT D3Q19 — BATCHED parameter sweep on GPU</h2>
+<pre id="log">init</pre>
+<script type="module">
+const log = document.getElementById('log');
+const print = (s, cls) => { const span = document.createElement('span'); span.className = cls||''; span.textContent = s+'\n'; log.appendChild(span); };
+log.textContent = '';
+
+// ── D3Q19 ────────────────────────────────────────────────────────────────
+const EX = [0, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1, 1,-1, 1,-1, 0, 0, 0, 0];
+const EY = [0, 0, 0, 1,-1, 0, 0, 1, 1,-1,-1, 0, 0, 0, 0, 1,-1, 1,-1];
+const EZ = [0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1, 1,-1,-1, 1, 1,-1,-1];
+const W36 = [12, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+const OPP = [0, 2, 1, 4, 3, 6, 5,10, 9, 8, 7,14,13,12,11,18,17,16,15];
+
+// ── LUT generation (CPU side, uploaded once per config) ────────────────
+const LUT_SIZE = 256;
+
+const CURVES = {
+    linear:    (x, umax) => Math.max(-umax, Math.min(umax, x)),
+    tanh:      (x, umax) => umax * Math.tanh(x / umax),
+    tanh_hard: (x, umax) => umax * Math.tanh(x / (umax * 0.7)),
+    soft_knee: (x, umax) => {
+        const a = Math.abs(x), s = Math.sign(x);
+        const knee = umax * 0.7;
+        if (a < knee) return x;
+        const t = (a - knee) / Math.max(1, (umax - knee) * 3);
+        return s * (knee + (umax - knee) * Math.tanh(t));
+    },
+    cubic: (x, umax) => {
+        const n = Math.max(-1.5, Math.min(1.5, x / umax));
+        return umax * (n - n*n*n/3) / (1 - 1/3);
+    },
+    sigmoid: (x, umax) => umax * (2 / (1 + Math.exp(-2 * x / umax)) - 1),
+};
+
+function buildLUT(curveName, umaxSCALE, lutRange) {
+    const lut = new Int32Array(LUT_SIZE);
+    const curve = CURVES[curveName];
+    const half = LUT_SIZE / 2;
+    for (let i = 0; i < LUT_SIZE; i++) {
+        const x = (i - half) * lutRange / half;
+        lut[i] = Math.round(curve(x, umaxSCALE));
+    }
+    return lut;
+}
+
+// ── Build a default sweep ─────────────────────────────────────────────
+function buildSweepConfigs() {
+    const params = new URLSearchParams(location.search);
+    if (params.has('configs')) return JSON.parse(decodeURIComponent(params.get('configs')));
+
+    // Default: parabola hunt across NY × tau × force
+    const cfgs = [];
+    // SWEEP: WALL_Y × RHO × tau × force — all in one dispatch
+    // Grid is always NY=32, but WALL_Y controls effective channel width per config
+    const base = {
+        NX: 32, NY: 32, NZ: 1,
+        ON2: 8, OD2: 5,
+        INJECT_X: 6, INJECT_TICKS: 0,
+        MODE: 0,
+    };
+    const wallYs = [6, 8, 12, 16, 24, 32];
+    const rhos = [1008, 2016, 3024, 4032];
+    const tauPairs = [
+        [1,10],   // tau=10
+        [1,20],   // tau=20
+        [1,50],   // tau=50
+        [1,100],  // tau=100
+    ];
+    const forceMults = [1.0, 2.0, 3.0];
+    const umaxFracs = [0.1, 0.15, 0.25];
+    const SCALE = 32;
+    for (const WALL_Y of wallYs)
+        for (const RHO of rhos)
+            for (const [ON1, OD1] of tauPairs)
+                for (const fm of forceMults)
+                    for (const frac of umaxFracs) {
+                        const FORCE = Math.max(1, Math.round(RHO / SCALE * fm));
+                        const UMAX = Math.max(1, Math.round(SCALE * frac));
+                        cfgs.push({ ...base, WALL_Y, RHO, SCALE, ON1, OD1, FORCE, UMAX, LUT_MODE: 1, LUT_CURVE: 'linear' });
+                    }
+
+    return cfgs;
+}
+
+// Per-config struct (16 i32 = 64 bytes)
+function packConfigParams(cfg) {
+    return [
+        cfg.RHO, cfg.SCALE, cfg.ON1, cfg.OD1,
+        cfg.ON2, cfg.OD2, cfg.FORCE, cfg.UMAX,
+        cfg.LUT_MODE, cfg.MODE, cfg.INJECT_X, cfg.INJECT_TICKS,
+        cfg.WALL_Y || cfg.NY, 0, 0, 0  // WALL_Y defaults to NY
+    ];
+}
+
+async function run() {
+    const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) { print('No WebGPU', 'fail'); print('Done.'); return; }
+    const device = await adapter.requestDevice({
+        requiredLimits: {
+            maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+            maxBufferSize: adapter.limits.maxBufferSize,
+        }
+    });
+    print(`GPU: ${adapter.info?.description || '?'}`);
+
+    const configs = buildSweepConfigs();
+    const N_CFG = configs.length;
+
+    // All configs must share grid dimensions (NX, NY, NZ)
+    const NX = configs[0].NX, NY = configs[0].NY, NZ = configs[0].NZ;
+    for (const c of configs) {
+        if (c.NX !== NX || c.NY !== NY || c.NZ !== NZ) {
+            print('FATAL: all configs must share NX/NY/NZ', 'fail');
+            print('Done.'); return;
+        }
+    }
+    const N_CELLS = NX * NY * NZ;
+    const TOTAL_CELLS = N_CFG * N_CELLS;
+    const TICKS = 3000;
+
+    print(`Configs: ${N_CFG}  Grid: ${NX}x${NY}x${NZ}  Cells/cfg: ${N_CELLS}  Total: ${TOTAL_CELLS}`);
+    print(`Distributions buffer: ${(N_CFG * N_CELLS * 19 * 4 / 1024 / 1024).toFixed(1)} MB × 2 (ping-pong)`);
+
+    // ── Allocate ──────────────────────────────────────────────────────
+    const fSize = N_CFG * N_CELLS * 19 * 4;
+    const fA = device.createBuffer({size: fSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+    const fB = device.createBuffer({size: fSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC});
+
+    const paramsArr = new Int32Array(N_CFG * 16);
+    for (let i = 0; i < N_CFG; i++) {
+        const p = packConfigParams(configs[i]);
+        for (let j = 0; j < 16; j++) paramsArr[i*16 + j] = p[j];
+    }
+    const paramsBuf = device.createBuffer({size: paramsArr.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(paramsBuf, 0, paramsArr);
+
+    // Per-config LUTs
+    const lutArr = new Int32Array(N_CFG * LUT_SIZE);
+    for (let i = 0; i < N_CFG; i++) {
+        const lut = buildLUT(configs[i].LUT_CURVE, configs[i].UMAX, configs[i].SCALE);
+        for (let j = 0; j < LUT_SIZE; j++) lutArr[i*LUT_SIZE + j] = lut[j];
+    }
+    const lutBuf = device.createBuffer({size: lutArr.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(lutBuf, 0, lutArr);
+
+    // Tick uniform
+    const tickBuf = device.createBuffer({size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
+
+    // Initialize fA: equilibrium at rest for each cfg
+    {
+        const init = new Int32Array(N_CFG * N_CELLS * 19);
+        for (let cfg = 0; cfg < N_CFG; cfg++) {
+            const RHO = configs[cfg].RHO;
+            const cfgOff = cfg * N_CELLS * 19;
+            let restVal = RHO;
+            for (let q = 1; q < 19; q++) {
+                const v = Math.floor(W36[q] * RHO / 36);
+                for (let i = 0; i < N_CELLS; i++) {
+                    init[cfgOff + q * N_CELLS + i] = v;
+                }
+                restVal -= v;
+            }
+            for (let i = 0; i < N_CELLS; i++) {
+                init[cfgOff + 0 * N_CELLS + i] = restVal;
+            }
+        }
+        device.queue.writeBuffer(fA, 0, init);
+        print(`Initialized ${(init.length * 4 / 1024 / 1024).toFixed(1)} MB`);
+    }
+
+    // ── BIG SHADER ─────────────────────────────────────────────────────
+    const wgsl = `
+struct Tick { tick: i32, NX: i32, NY: i32, NZ: i32, N_CFG: i32, _p1: i32, _p2: i32, _p3: i32, };
+
+@group(0) @binding(0) var<uniform> T: Tick;
+@group(0) @binding(1) var<storage, read>       cfgParams: array<i32>;  // 16 i32 per cfg
+@group(0) @binding(2) var<storage, read>       LUT:       array<i32>;  // 256 i32 per cfg
+@group(0) @binding(3) var<storage, read>       fIn:       array<i32>;
+@group(0) @binding(4) var<storage, read_write> fOut:      array<i32>;
+
+const EX = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1, 1,-1, 1,-1, 0, 0, 0, 0);
+const EY = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1, 1,-1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+const EZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1, 1,-1,-1, 1, 1,-1,-1);
+const W36 = array<i32, 19>(12, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1);
+const OPP = array<i32, 19>(0, 2, 1, 4, 3, 6, 5,10, 9, 8, 7,14,13,12,11,18,17,16,15);
+const LUT_SIZE: i32 = 256;
+
+fn cellAddr(cfg: i32, q: i32, x: i32, y: i32, z: i32) -> i32 {
+    let N = T.NX * T.NY * T.NZ;
+    return cfg * N * 19 + q * N + (x + y * T.NX + z * T.NX * T.NY);
+}
+
+fn lutLook(cfg: i32, v: i32, lut_range: i32) -> i32 {
+    let half = LUT_SIZE / 2;
+    var i = v * half / max(lut_range, 1) + half;
+    if (i < 0) { i = 0; }
+    if (i >= LUT_SIZE) { i = LUT_SIZE - 1; }
+    return LUT[cfg * LUT_SIZE + i];
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    // 2D dispatch: linearize gid.x + gid.y * (max workgroups * workgroup_size)
+    let linear_id = gid.x + gid.y * 65535u * 64u;
+    let total_per_cfg = T.NX * T.NY * T.NZ;
+    let cfg_idx = i32(linear_id) / total_per_cfg;
+    let cell = i32(linear_id) % total_per_cfg;
+    if (cfg_idx >= T.N_CFG || cell >= total_per_cfg) { return; }
+
+    // Load config params
+    let cp_off = cfg_idx * 16;
+    let RHO    = cfgParams[cp_off + 0];
+    let SCALE  = cfgParams[cp_off + 1];
+    let ON1    = cfgParams[cp_off + 2];
+    let OD1    = cfgParams[cp_off + 3];
+    let ON2    = cfgParams[cp_off + 4];
+    let OD2    = cfgParams[cp_off + 5];
+    let FORCE  = cfgParams[cp_off + 6];
+    let UMAX   = cfgParams[cp_off + 7];
+    let LUT_MODE  = cfgParams[cp_off + 8];
+    let MODE      = cfgParams[cp_off + 9];
+    let INJECT_X  = cfgParams[cp_off + 10];
+    let INJECT_TICKS = cfgParams[cp_off + 11];
+    let WALL_Y    = cfgParams[cp_off + 12];  // effective NY for this config (walls at y=0 and y=WALL_Y-1)
+
+    // Bail out beyond valid range
+    let total = total_per_cfg * 1;  // num configs handled outside
+    if (cell >= total_per_cfg) { return; }
+
+    let z = cell / (T.NX * T.NY);
+    let y = (cell / T.NX) % T.NY;
+    let x = cell % T.NX;
+
+    // Walls: pass through (per-config wall position)
+    if (y == 0 || y >= WALL_Y - 1) {
+        for (var q = 0; q < 19; q++) {
+            let a = cellAddr(cfg_idx, q, x, y, z);
+            fOut[a] = fIn[a];
+        }
+        return;
+    }
+
+    // Gather streaming
+    var f: array<i32, 19>;
+    for (var q = 0; q < 19; q++) {
+        let sx = (x - EX[q] + T.NX) % T.NX;
+        let sy = y - EY[q];
+        let sz = (z - EZ[q] + T.NZ) % T.NZ;
+        if (sy <= 0 || sy >= WALL_Y - 1) {
+            // Bounce-back: take OPP[q] from this cell (previous tick)
+            f[q] = fIn[cellAddr(cfg_idx, OPP[q], x, y, z)];
+        } else {
+            f[q] = fIn[cellAddr(cfg_idx, q, sx, sy, sz)];
+        }
+    }
+
+    // Macroscopic
+    var rho: i32 = 0;
+    var jx: i32 = 0;
+    var jy: i32 = 0;
+    var jz: i32 = 0;
+    for (var q = 0; q < 19; q++) {
+        rho = rho + f[q];
+        jx = jx + EX[q] * f[q];
+        jy = jy + EY[q] * f[q];
+        jz = jz + EZ[q] * f[q];
+    }
+
+    // Apply force
+    if (MODE == 0) {
+        jx = jx + FORCE;
+    } else {
+        if (T.tick <= INJECT_TICKS && x == INJECT_X && abs(y - T.NY/2) <= 2) {
+            jx = jx + FORCE;
+        }
+    }
+
+    var ux = jx * SCALE / rho;
+    var uy = jy * SCALE / rho;
+    var uz = jz * SCALE / rho;
+
+    // LUT clamp
+    if (LUT_MODE == 1) {
+        ux = lutLook(cfg_idx, ux, SCALE);
+        uy = lutLook(cfg_idx, uy, SCALE);
+        uz = lutLook(cfg_idx, uz, SCALE);
+    } else if (LUT_MODE == 2) {
+        // Magnitude LUT
+        let mag2 = ux*ux + uy*uy + uz*uz;
+        if (mag2 != 0) {
+            let mag = i32(sqrt(f32(mag2)));
+            let new_mag = lutLook(cfg_idx, mag, SCALE);
+            let m = max(mag, 1);
+            ux = ux * new_mag / m;
+            uy = uy * new_mag / m;
+            uz = uz * new_mag / m;
+        }
+    }
+
+    let usq = ux*ux + uy*uy + uz*uz;
+
+    // Equilibrium (split quadratic for i32 safety)
+    var feq: array<i32, 19>;
+    var feqSum: i32 = 0;
+    for (var q = 1; q < 19; q++) {
+        let cu = EX[q]*ux + EY[q]*uy + EZ[q]*uz;
+        let base = W36[q] * rho / 36;
+        let linear = W36[q] * rho * 3 * cu / (36 * SCALE);
+        let quad = linear * 3 * cu / (2 * SCALE);
+        let usq_c = W36[q] * rho * 3 / 72;
+        let usq_t = usq_c * usq / (SCALE * SCALE);
+        feq[q] = base + linear + quad - usq_t;
+        feqSum = feqSum + feq[q];
+    }
+    feq[0] = rho - feqSum;
+
+    // TRT collision
+    var fc: array<i32, 19>;
+    fc[0] = feq[0] + (OD1 - ON1) * (f[0] - feq[0]) / OD1;
+    let pairs_a = array<i32, 9>(1, 3, 5, 7, 8, 11, 12, 15, 16);
+    let pairs_b = array<i32, 9>(2, 4, 6, 10, 9, 14, 13, 18, 17);
+    for (var p = 0; p < 9; p++) {
+        let a = pairs_a[p]; let b = pairs_b[p];
+        let fneq_p = (f[a] - feq[a] + f[b] - feq[b]) / 2;
+        let fneq_m = (f[a] - feq[a] - f[b] + feq[b]) / 2;
+        let sym  = (OD1 - ON1) * fneq_p / OD1;
+        let asym = (OD2 - ON2) * fneq_m / OD2;
+        fc[a] = feq[a] + sym + asym;
+        fc[b] = feq[b] + sym - asym;
+    }
+    var fcSum: i32 = 0;
+    for (var q = 1; q < 19; q++) { fcSum = fcSum + fc[q]; }
+    fc[0] = rho - fcSum;
+
+    // Write
+    for (var q = 0; q < 19; q++) {
+        fOut[cellAddr(cfg_idx, q, x, y, z)] = fc[q];
+    }
+}
+`;
+
+    print('Compiling shader...', 'dim');
+    const module = device.createShaderModule({ code: wgsl });
+    const info = await module.getCompilationInfo();
+    let hasError = false;
+    for (const m of info.messages) {
+        if (m.type === 'error') { print(`SHADER ERR L${m.lineNum}: ${m.message}`, 'fail'); hasError = true; }
+    }
+    if (hasError) { print('Done.'); return; }
+    const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+
+    // Bind groups (ping-pong)
+    function makeBG(src, dst) {
+        return device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: tickBuf } },
+                { binding: 1, resource: { buffer: paramsBuf } },
+                { binding: 2, resource: { buffer: lutBuf } },
+                { binding: 3, resource: { buffer: src } },
+                { binding: 4, resource: { buffer: dst } },
+            ]
+        });
+    }
+    const bgAB = makeBG(fA, fB);
+    const bgBA = makeBG(fB, fA);
+
+    const wgTotal = Math.ceil((N_CFG * N_CELLS) / 64);
+    // WebGPU max per dimension is 65535. Split into 2D dispatch if needed.
+    const wgX = Math.min(wgTotal, 65535);
+    const wgY = Math.ceil(wgTotal / 65535);
+    print(`Workgroups per tick: ${wgX} x ${wgY} = ${wgX*wgY} (${N_CFG * N_CELLS} threads)`);
+
+    // ── Run all ticks ─────────────────────────────────────────────────
+    const t0 = performance.now();
+    let useAB = true;
+    for (let tick = 1; tick <= TICKS; tick++) {
+        device.queue.writeBuffer(tickBuf, 0, new Int32Array([tick, NX, NY, NZ, N_CFG, 0, 0, 0]));
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, useAB ? bgAB : bgBA);
+        pass.dispatchWorkgroups(wgX, wgY);
+        pass.end();
+        device.queue.submit([enc.finish()]);
+        useAB = !useAB;
+    }
+    await device.queue.onSubmittedWorkDone();
+    const t1 = performance.now();
+    print(`${TICKS} ticks × ${N_CFG} configs in ${(t1-t0).toFixed(1)}ms = ${((t1-t0)/TICKS).toFixed(3)}ms/tick (all configs)`);
+    print(`Per-config-tick: ${((t1-t0)/TICKS/N_CFG*1000).toFixed(2)}μs`, 'gold');
+
+    // ── Readback ──────────────────────────────────────────────────────
+    const finalBuf = useAB ? fA : fB;  // last write went here
+    const readBuf = device.createBuffer({size: fSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST});
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(finalBuf, 0, readBuf, 0, fSize);
+    device.queue.submit([enc.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    const data = new Int32Array(readBuf.getMappedRange().slice(0));
+    readBuf.unmap();
+
+    // ── Per-config analysis ───────────────────────────────────────────
+    print(`Analyzing ${N_CFG} configs...`);
+    for (let cfg = 0; cfg < N_CFG; cfg++) {
+        const c = configs[cfg];
+        const cfgOff = cfg * N_CELLS * 19;
+        const profile = new Float64Array(NY);
+        for (let y = 0; y < NY; y++) {
+            let sumUx = 0, count = 0;
+            for (let z = 0; z < NZ; z++) {
+                for (let x = 0; x < NX; x++) {
+                    const cellIdx = x + y * NX + z * NX * NY;
+                    let rho = 0, jx = 0;
+                    for (let q = 0; q < 19; q++) {
+                        const v = data[cfgOff + q * N_CELLS + cellIdx];
+                        rho += v;
+                        jx += EX[q] * v;
+                    }
+                    if (rho > 0) {
+                        sumUx += (jx * c.SCALE) / rho;
+                        count++;
+                    }
+                }
+            }
+            profile[y] = count > 0 ? sumUx / count / c.SCALE : 0;
+        }
+        let fmin = Infinity, fmax = -Infinity, totalMass = 0;
+        for (let i = cfgOff; i < cfgOff + N_CELLS * 19; i++) {
+            if (data[i] < fmin) fmin = data[i];
+            if (data[i] > fmax) fmax = data[i];
+            totalMass += data[i];
+        }
+        const u10ok = fmin >= 0 && fmax <= 1023;
+        const expectedMass = c.RHO * N_CELLS;
+        const massDrift = ((totalMass - expectedMass) / expectedMass) * 100;
+        let uMax = 0;
+        for (let y = 1; y < NY-1; y++) {
+            if (Math.abs(profile[y]) > Math.abs(uMax)) uMax = profile[y];
+        }
+        const interior = Array.from(profile).slice(1, NY-1);
+        const mid = Math.floor(interior.length / 2);
+        const center = (interior[mid] + (interior[mid-1]||0) + (interior[mid+1]||0)) / 3;
+        const edge = (interior[0] + interior[interior.length-1]) / 2;
+        const parabola_score = Math.abs(edge) > 1e-6 ? center / Math.abs(edge) : 0;
+
+        console.log('RESULT:' + JSON.stringify({
+            cfg: c, uMax, fmin, fmax, u10ok, massDrift,
+            profile: Array.from(profile), parabola_score
+        }));
+    }
+
+    print('Done.');
+}
+
+run().catch(e => { print('FATAL: ' + e.message + '\n' + e.stack, 'fail'); print('Done.'); });
+</script>
+</body></html>

@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Dormant Cell Skip Benchmark</title>
+<style>body{background:#0a0a1a;color:#ccc;font-family:'SF Mono',monospace;padding:24px;font-size:13px}
+pre{background:#111;padding:16px;border-radius:8px;overflow-x:auto;line-height:1.5}
+.pass{color:#4fc3f7}.fail{color:#f44}.gold{color:#ffd700}.dim{color:#666}.warn{color:#ff9800}
+h2{color:#4fc3f7;margin-bottom:4px}
+</style>
+</head><body>
+<h2>Dormant Cell Skip: Active-Only TRT Collision</h2>
+<pre id="log">Initializing WebGPU...</pre>
+<script type="module">
+const log = document.getElementById('log');
+const print = (s, cls) => { const span = document.createElement('span'); span.className = cls||''; span.textContent = s+'\n'; log.appendChild(span); log.scrollTop = log.scrollHeight; };
+log.textContent = '';
+
+const SCALE = 1024;
+const ON1 = 1, OD1 = 75;
+const ON2 = 8, OD2 = 5;
+const UMAX = Math.round(SCALE * 0.75);
+const rho16 = 18000;
+const W_GRID = 128, H_GRID = 128, D_GRID = 96;
+const N = W_GRID * H_GRID * D_GRID;
+const DORMANT_THRESHOLD = 5;
+const ITERS = 30;
+const RUNS = 3;
+
+const CONSTS = `
+    const W: u32 = ${W_GRID}u;
+    const H: u32 = ${H_GRID}u;
+    const D_GRID: u32 = ${D_GRID}u;
+    const NCELLS: u32 = ${N}u;
+    const SCALE_I: i32 = ${SCALE}i;
+    const RHO0: i32 = ${rho16}i;
+    const ON1: i32 = ${ON1}i;
+    const OD1: i32 = ${OD1}i;
+    const ON2: i32 = ${ON2}i;
+    const OD2: i32 = ${OD2}i;
+    const UMAX: i32 = ${UMAX}i;
+    const FORCE_BODY: i32 = 0i;
+    const DORMANT_THRESH: i32 = ${DORMANT_THRESHOLD}i;
+    const DX = array<i32, 19>(0, 0, 0, 1,-1, 0, 0, 1,-1, 1,-1, 0, 0, 0, 0, 1,-1, 1,-1);
+    const DY = array<i32, 19>(0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1, 1,-1, 0, 0, 0, 0);
+    const DZ = array<i32, 19>(0, 0, 0, 0, 0, 1,-1, 0, 0, 0, 0, 1,-1,-1, 1, 1,-1,-1, 1);
+    const OPP = array<u32, 19>(0u, 2u, 1u, 4u, 3u, 6u, 5u, 8u, 7u, 10u, 9u, 12u, 11u, 14u, 13u, 16u, 15u, 18u, 17u);
+`;
+
+const READ_SLOT_FN = `
+    fn read_slot(cell_idx: u32, q: u32) -> i32 {
+        let qm1 = q - 1u;
+        let word_idx = qm1 / 2u;
+        let slot = qm1 % 2u;
+        let packed = fbuf[word_idx * NCELLS + cell_idx];
+        return i32((packed >> (slot * 16u)) & 0xFFFFu);
+    }
+`;
+
+const GATHER_AA = `
+    var f: array<i32, 19>;
+    for (var q = 1u; q < 19u; q++) {
+        let read_q = select(q, OPP[q], is_even == 1u);
+        let sx = x - DX[q];
+        let sy = y - DY[q];
+        let sz = z - DZ[q];
+        if (sx >= 0 && sx < i32(W) && sy >= 0 && sy < i32(H) && sz >= 0 && sz < i32(D_GRID)) {
+            let src_idx = u32(sx) + u32(sy) * W + u32(sz) * W * H;
+            f[q] = read_slot(src_idx, read_q);
+        } else {
+            let oq = OPP[q];
+            if (oq == 0u) { f[q] = 0; }
+            else { f[q] = read_slot(idx, select(oq, q, is_even == 1u)); }
+        }
+    }
+    var sum_f = 0i;
+    for (var q = 1u; q < 19u; q++) { sum_f += f[q]; }
+    f[0] = RHO0 - sum_f;
+    let rho = RHO0;
+`;
+
+const WRITEBACK_AA = `
+    var out: array<i32, 19>;
+    for (var q = 1u; q < 19u; q++) {
+        let write_q = select(q, OPP[q], is_even == 1u);
+        out[write_q] = col[q];
+    }
+    for (var w = 0u; w < 9u; w++) {
+        let a = u32(out[w * 2u + 1u]) & 0xFFFFu;
+        let b = u32(out[w * 2u + 2u]) & 0xFFFFu;
+        fbuf[w * NCELLS + idx] = a | (b << 16u);
+    }
+`;
+
+// Fused pair block WITHOUT max_neq tracking (for pure baseline)
+function pairBlockPure(a, b, w, cuExpr) {
+    return `
+    {
+        let cu = ${cuExpr};
+        let base = ${w} * rho / 36;
+        let linear = ${w} * rho * 3 * cu / (36 * SCALE_I);
+        let quad = linear * 3 * cu / (2 * SCALE_I);
+        let usq_c = ${w} * rho * 3 / 72;
+        let usq_t = usq_c * usq / (SCALE_I * SCALE_I);
+        let feq_a = base + linear + quad - usq_t;
+        let feq_b = feq_a - 2 * linear;
+        let fneq_p = (f[${a}] - feq_a + f[${b}] - feq_b) / 2;
+        let fneq_m = (f[${a}] - feq_a - f[${b}] + feq_b) / 2;
+        let sym  = (OD1 - ON1) * fneq_p / OD1;
+        let asym = (OD2 - ON2) * fneq_m / OD2;
+        col[${a}] = feq_a + sym + asym;
+        col[${b}] = feq_b + sym - asym;
+    }`;
+}
+
+// Fused pair block WITH max_neq tracking (for dormant variants)
+function pairBlockDormant(a, b, w, cuExpr) {
+    return `
+    {
+        let cu = ${cuExpr};
+        let base = ${w} * rho / 36;
+        let linear = ${w} * rho * 3 * cu / (36 * SCALE_I);
+        let quad = linear * 3 * cu / (2 * SCALE_I);
+        let usq_c = ${w} * rho * 3 / 72;
+        let usq_t = usq_c * usq / (SCALE_I * SCALE_I);
+        let feq_a = base + linear + quad - usq_t;
+        let feq_b = feq_a - 2 * linear;
+        let fneq_a = f[${a}] - feq_a;
+        let fneq_b = f[${b}] - feq_b;
+        max_neq = max(max_neq, abs(fneq_a));
+        max_neq = max(max_neq, abs(fneq_b));
+        let fneq_p = (fneq_a + fneq_b) / 2;
+        let fneq_m = (fneq_a - fneq_b) / 2;
+        let sym  = (OD1 - ON1) * fneq_p / OD1;
+        let asym = (OD2 - ON2) * fneq_m / OD2;
+        col[${a}] = feq_a + sym + asym;
+        col[${b}] = feq_b + sym - asym;
+    }`;
+}
+
+function makePairs(fn) {
+    return `
+    ${fn(1, 2, 2, 'uy')}
+    ${fn(3, 4, 2, 'ux')}
+    ${fn(5, 6, 2, 'uz')}
+    ${fn(7, 8, 1, 'ux + uy')}
+    ${fn(9, 10, 1, 'ux - uy')}
+    ${fn(11, 12, 1, 'uy + uz')}
+    ${fn(13, 14, 1, 'uy - uz')}
+    ${fn(15, 16, 1, 'ux + uz')}
+    ${fn(17, 18, 1, 'ux - uz')}`;
+}
+
+const MOMENTUM = `
+    var jx: i32 = 0; var jy: i32 = 0; var jz: i32 = 0;
+    for (var q = 1u; q < 19u; q++) {
+        jx += DX[q] * f[q];
+        jy += DY[q] * f[q];
+        jz += DZ[q] * f[q];
+    }
+    jx += FORCE_BODY;
+    var ux = clamp(jx * SCALE_I / rho, -UMAX, UMAX);
+    var uy = clamp(jy * SCALE_I / rho, -UMAX, UMAX);
+    var uz = clamp(jz * SCALE_I / rho, -UMAX, UMAX);
+    let usq = ux*ux + uy*uy + uz*uz;
+    var col: array<i32, 19>;
+`;
+
+const MASS_CONSERVATION = `
+    var colSum: i32 = 0;
+    for (var q = 1u; q < 19u; q++) { colSum += col[q]; }
+    col[0] = rho - colSum;
+`;
+
+// ============================================================
+// SHADER: Pure baseline (no flags, no max_neq — matches compute-opt-bench)
+// ============================================================
+function makeBaselineShader() {
+    return `
+        ${CONSTS}
+        struct Tick { even: u32, }
+        @group(0) @binding(0) var<uniform> tick: Tick;
+        @group(0) @binding(1) var<storage, read_write> fbuf: array<u32>;
+        ${READ_SLOT_FN}
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+            let is_even = tick.even;
+            ${GATHER_AA}
+            ${MOMENTUM}
+            ${makePairs(pairBlockPure)}
+            ${MASS_CONSERVATION}
+            ${WRITEBACK_AA}
+        }
+    `;
+}
+
+// ============================================================
+// SHADER: Early-exit (no flags, no scan — just bail after momentum if inactive)
+// ============================================================
+function makeEarlyExitShader() {
+    return `
+        ${CONSTS}
+        struct Tick { even: u32, }
+        @group(0) @binding(0) var<uniform> tick: Tick;
+        @group(0) @binding(1) var<storage, read_write> fbuf: array<u32>;
+        ${READ_SLOT_FN}
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+            let is_even = tick.even;
+            ${GATHER_AA}
+
+            // Momentum computation (same as baseline)
+            var jx: i32 = 0; var jy: i32 = 0; var jz: i32 = 0;
+            for (var q = 1u; q < 19u; q++) {
+                jx += DX[q] * f[q];
+                jy += DY[q] * f[q];
+                jz += DZ[q] * f[q];
+            }
+            jx += FORCE_BODY;
+
+            // ACTIVITY CHECK: if no momentum, collision is identity, skip everything
+            let activity = abs(jx) + abs(jy) + abs(jz);
+            if (activity < ${DORMANT_THRESHOLD}i) { return; }
+
+            var ux = clamp(jx * SCALE_I / rho, -UMAX, UMAX);
+            var uy = clamp(jy * SCALE_I / rho, -UMAX, UMAX);
+            var uz = clamp(jz * SCALE_I / rho, -UMAX, UMAX);
+            let usq = ux*ux + uy*uy + uz*uz;
+            var col: array<i32, 19>;
+            ${makePairs(pairBlockPure)}
+            ${MASS_CONSERVATION}
+            ${WRITEBACK_AA}
+        }
+    `;
+}
+
+// ============================================================
+// SHADER: Active list scan
+// ============================================================
+function makeScanShader() {
+    return `
+        ${CONSTS}
+        @group(0) @binding(0) var<storage, read> flags: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> activeList: array<u32>;
+        @group(0) @binding(2) var<storage, read_write> activeCount: atomic<u32>;
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let idx = gid.x;
+            if (idx >= NCELLS) { return; }
+            if (flags[idx] != 1u) {
+                let slot = atomicAdd(&activeCount, 1u);
+                activeList[slot] = idx;
+                return;
+            }
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+            for (var q = 1u; q < 19u; q++) {
+                let nx = x + DX[q];
+                let ny = y + DY[q];
+                let nz = z + DZ[q];
+                if (nx >= 0 && nx < i32(W) && ny >= 0 && ny < i32(H) && nz >= 0 && nz < i32(D_GRID)) {
+                    let nidx = u32(nx) + u32(ny) * W + u32(nz) * W * H;
+                    if (flags[nidx] != 1u) {
+                        let slot = atomicAdd(&activeCount, 1u);
+                        activeList[slot] = idx;
+                        return;
+                    }
+                }
+            }
+        }
+    `;
+}
+
+// ============================================================
+// SHADER: Active-only collision (reads idx from active list, writes flags)
+// ============================================================
+function makeActiveCollisionShader() {
+    return `
+        ${CONSTS}
+        struct Tick { even: u32, }
+        @group(0) @binding(0) var<uniform> tick: Tick;
+        @group(0) @binding(1) var<storage, read_write> fbuf: array<u32>;
+        @group(0) @binding(2) var<storage, read_write> flags: array<u32>;
+        @group(0) @binding(3) var<storage, read> activeList: array<u32>;
+        ${READ_SLOT_FN}
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3u) {
+            let active_i = gid.x;
+            let idx = activeList[active_i];
+            if (idx >= NCELLS) { return; }
+            let x = i32(idx % W);
+            let y = i32((idx / W) % H);
+            let z = i32(idx / (W * H));
+            let is_even = tick.even;
+            ${GATHER_AA}
+            ${MOMENTUM}
+            var max_neq: i32 = 0;
+            ${makePairs(pairBlockDormant)}
+            ${MASS_CONSERVATION}
+            flags[idx] = select(0u, 1u, max_neq <= DORMANT_THRESH);
+            ${WRITEBACK_AA}
+        }
+    `;
+}
+
+// ============================================================
+// Init data: perturbed distributions for realistic collision work
+// Active cells get velocity perturbation, dormant cells at true equilibrium
+// ============================================================
+function makeInitData(activeSet) {
+    const feqFace = Math.floor(2 * rho16 / 36);  // 1000
+    const feqEdge = Math.floor(1 * rho16 / 36);  // 500
+
+    const data = new Uint32Array(9 * N);
+    for (let i = 0; i < N; i++) {
+        if (activeSet.has(i)) {
+            // Perturbed: add velocity-like perturbation to simulate real fluid work
+            // This creates fneq ~ 20-50 per direction, well above dormant threshold
+            const x = i % W_GRID, y = Math.floor(i / W_GRID) % H_GRID;
+            const pertX = Math.round(30 * Math.sin(x * 0.2 + y * 0.3));
+            const pertY = Math.round(20 * Math.cos(x * 0.3 - y * 0.1));
+            const vals = new Array(19);
+            for (let q = 1; q <= 6; q++) vals[q] = feqFace + pertX * [0,0,0,1,-1,0,0][q] + pertY * [0,1,-1,0,0,0,0][q];
+            for (let q = 7; q <= 18; q++) vals[q] = feqEdge + Math.round(pertX * 0.3) + Math.round(pertY * 0.2);
+            let sum = 0;
+            for (let q = 1; q <= 18; q++) { vals[q] = Math.max(0, Math.min(65535, vals[q])); sum += vals[q]; }
+            vals[0] = rho16 - sum;
+            for (let w = 0; w < 9; w++) {
+                const a = vals[w*2+1] & 0xFFFF;
+                const b = vals[w*2+2] & 0xFFFF;
+                data[w * N + i] = (a | (b << 16)) >>> 0;
+            }
+        } else {
+            // Exact equilibrium
+            for (let w = 0; w < 9; w++) {
+                const a = feqFace & 0xFFFF;  // face for w<3
+                const b = feqFace & 0xFFFF;
+                if (w < 3) {
+                    data[w * N + i] = (feqFace & 0xFFFF) | ((feqFace & 0xFFFF) << 16);
+                } else {
+                    data[w * N + i] = (feqEdge & 0xFFFF) | ((feqEdge & 0xFFFF) << 16);
+                }
+            }
+        }
+    }
+    return data;
+}
+
+// Build a set of active cell indices in a spherical region
+function makeActiveRegion(fraction) {
+    const cx = W_GRID / 2, cy = H_GRID / 2, cz = D_GRID / 2;
+    const targetR = Math.cbrt(fraction * W_GRID * H_GRID * D_GRID * 3 / (4 * Math.PI));
+    const r2 = targetR * targetR;
+    const active = new Set();
+
+    if (fraction >= 1.0) {
+        for (let i = 0; i < N; i++) active.add(i);
+        return active;
+    }
+
+    // Core sphere
+    for (let z = 0; z < D_GRID; z++) {
+        for (let y = 0; y < H_GRID; y++) {
+            for (let x = 0; x < W_GRID; x++) {
+                const dx = x - cx, dy = y - cy, dz = z - cz;
+                if (dx*dx + dy*dy + dz*dz <= r2) {
+                    active.add(x + y * W_GRID + z * W_GRID * H_GRID);
+                }
+            }
+        }
+    }
+    // Add neighbors of active cells (they need computation due to streaming)
+    const coreActive = new Set(active);
+    for (const idx of coreActive) {
+        const x = idx % W_GRID;
+        const y = Math.floor(idx / W_GRID) % H_GRID;
+        const z = Math.floor(idx / (W_GRID * H_GRID));
+        for (let dz = -1; dz <= 1; dz++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    if (dx === 0 && dy === 0 && dz === 0) continue;
+                    const nx = x+dx, ny = y+dy, nz = z+dz;
+                    if (nx >= 0 && nx < W_GRID && ny >= 0 && ny < H_GRID && nz >= 0 && nz < D_GRID) {
+                        active.add(nx + ny * W_GRID + nz * W_GRID * H_GRID);
+                    }
+                }
+            }
+        }
+    }
+    return active;
+}
+
+function median(arr) {
+    const sorted = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
+}
+
+async function run() {
+    const adapter = await navigator.gpu?.requestAdapter();
+    if (!adapter) { print('No WebGPU adapter', 'fail'); return; }
+    const device = await adapter.requestDevice({
+        requiredLimits: {
+            maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+            maxBufferSize: adapter.limits.maxBufferSize
+        }
+    });
+    const gpuName = adapter.info?.description || adapter.info?.vendor || 'unknown';
+    print(`GPU: ${gpuName}`);
+    print(`Grid: ${W_GRID}x${H_GRID}x${D_GRID} = ${(N/1e6).toFixed(2)}M cells`);
+    print(`u16 AA, fused pair-symmetric TRT, RHO=${rho16}, SCALE=${SCALE}`);
+    print(`Dormant threshold: max|fneq| <= ${DORMANT_THRESHOLD}`);
+    print(`${ITERS} timed iters x ${RUNS} runs (median reported)`);
+    print('');
+
+    const STORAGE = GPUBufferUsage.STORAGE;
+    const UNIFORM = GPUBufferUsage.UNIFORM;
+    const COPY_DST = GPUBufferUsage.COPY_DST;
+    const COPY_SRC = GPUBufferUsage.COPY_SRC;
+    const MAP_READ = GPUBufferUsage.MAP_READ;
+    const wg = Math.ceil(N / 256);
+
+    // Compile all shaders
+    async function compile(name, code) {
+        const mod = device.createShaderModule({ code });
+        const info = await mod.getCompilationInfo();
+        const errs = info.messages.filter(m => m.type === 'error');
+        if (errs.length > 0) { for (const e of errs) print(`  ${name}: ${e.message}`, 'fail'); return null; }
+        return mod;
+    }
+
+    const baselineMod = await compile('Baseline', makeBaselineShader());
+    const earlyExitMod = await compile('EarlyExit', makeEarlyExitShader());
+    const scanMod = await compile('Scan', makeScanShader());
+    const activeCollisionMod = await compile('ActiveCollision', makeActiveCollisionShader());
+    if (!baselineMod || !earlyExitMod || !scanMod || !activeCollisionMod) { print('Shader compilation failed', 'fail'); return; }
+
+    const baselinePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: baselineMod, entryPoint: 'main' } });
+    const earlyExitPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: earlyExitMod, entryPoint: 'main' } });
+    const scanPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: scanMod, entryPoint: 'main' } });
+    const activeCollisionPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: activeCollisionMod, entryPoint: 'main' } });
+
+    // ============================================================
+    // BENCHMARK: baseline and compact-list at each active fraction
+    // For each fraction, both use the SAME init data with perturbed active cells
+    // ============================================================
+
+    const fractions = [0.01, 0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 1.00];
+    const results = [];
+
+    // First: measure pure baseline with 100% perturbed data (all cells doing real work)
+    print('=== BASELINE: all cells, no dormancy, full collision ===', 'gold');
+    {
+        const allActive = makeActiveRegion(1.0);
+        const initData = makeInitData(allActive);
+
+        const fbuf = device.createBuffer({ size: initData.byteLength, usage: STORAGE | COPY_DST });
+        const tickBuf = device.createBuffer({ size: 4, usage: UNIFORM | COPY_DST });
+
+        const bg = device.createBindGroup({ layout: baselinePipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: tickBuf } },
+            { binding: 1, resource: { buffer: fbuf } },
+        ]});
+
+        const runTimes = [];
+        for (let r = 0; r < RUNS + 1; r++) {
+            device.queue.writeBuffer(fbuf, 0, initData);
+            // Warmup
+            for (let i = 0; i < 5; i++) {
+                device.queue.writeBuffer(tickBuf, 0, new Uint32Array([i % 2]));
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(baselinePipeline); p.setBindGroup(0, bg); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+
+            const t0 = performance.now();
+            for (let i = 0; i < ITERS; i++) {
+                device.queue.writeBuffer(tickBuf, 0, new Uint32Array([(5+i) % 2]));
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(baselinePipeline); p.setBindGroup(0, bg); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            const ms = (performance.now() - t0) / ITERS;
+            if (r > 0) runTimes.push(ms); // skip first run (extra warmup)
+        }
+        const baselineMs = median(runTimes);
+        print(`  Runs: ${runTimes.map(t => t.toFixed(3)+'ms').join(', ')}`, 'dim');
+        print(`  Median: ${baselineMs.toFixed(3)}ms/tick  (${(baselineMs*1e6/N).toFixed(2)} ns/cell)`, 'pass');
+
+        results.push({ frac: 'baseline', actualPct: 100, activeCount: N, baselineMs, compactMs: baselineMs, savings: 0 });
+        console.log("RESULT:" + JSON.stringify({ test: 'baseline', tickMs: +baselineMs.toFixed(3), runs: runTimes.map(t=>+t.toFixed(3)) }));
+
+        fbuf.destroy(); tickBuf.destroy();
+    }
+    const baselineMs = results[0].baselineMs;
+    print('');
+
+    // ============================================================
+    // COMPACT LIST at each active fraction
+    // ============================================================
+    print('=== COMPACT LIST: scan + active-only collision ===', 'gold');
+    print('Active cells perturbed (real collision work). Dormant cells at exact equilibrium.', 'dim');
+    print('');
+
+    for (const frac of fractions) {
+        const label = `${(frac * 100).toFixed(0)}%`;
+        const activeRegion = makeActiveRegion(frac);
+        const initData = makeInitData(activeRegion);
+        const actualPct = (100 * activeRegion.size / N).toFixed(1);
+
+        // Make flag data: 0 = active (in region), 1 = dormant
+        const flagData = new Uint32Array(N).fill(1);
+        for (const idx of activeRegion) flagData[idx] = 0;
+
+        const fbuf = device.createBuffer({ size: initData.byteLength, usage: STORAGE | COPY_DST });
+        const tickBuf = device.createBuffer({ size: 4, usage: UNIFORM | COPY_DST });
+        const flagsBuf = device.createBuffer({ size: N * 4, usage: STORAGE | COPY_DST });
+        const activeListBuf = device.createBuffer({ size: N * 4, usage: STORAGE | COPY_DST });
+        const activeCountBuf = device.createBuffer({ size: 4, usage: STORAGE | COPY_DST | COPY_SRC });
+
+        // Build active list once (flags are static for this test)
+        device.queue.writeBuffer(fbuf, 0, initData);
+        device.queue.writeBuffer(flagsBuf, 0, flagData);
+        device.queue.writeBuffer(activeCountBuf, 0, new Uint32Array([0]));
+
+        const scanBG = device.createBindGroup({ layout: scanPipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: flagsBuf } },
+            { binding: 1, resource: { buffer: activeListBuf } },
+            { binding: 2, resource: { buffer: activeCountBuf } },
+        ]});
+
+        {
+            const enc = device.createCommandEncoder();
+            const p = enc.beginComputePass(); p.setPipeline(scanPipeline); p.setBindGroup(0, scanBG); p.dispatchWorkgroups(wg); p.end();
+            device.queue.submit([enc.finish()]);
+            await device.queue.onSubmittedWorkDone();
+        }
+
+        // Read active count
+        const countReadBuf = device.createBuffer({ size: 4, usage: MAP_READ | COPY_DST });
+        {
+            const enc = device.createCommandEncoder();
+            enc.copyBufferToBuffer(activeCountBuf, 0, countReadBuf, 0, 4);
+            device.queue.submit([enc.finish()]);
+            await device.queue.onSubmittedWorkDone();
+        }
+        await countReadBuf.mapAsync(GPUMapMode.READ);
+        const gpuActiveCount = new Uint32Array(countReadBuf.getMappedRange())[0];
+        countReadBuf.unmap(); countReadBuf.destroy();
+
+        const activeWg = Math.max(1, Math.ceil(gpuActiveCount / 256));
+
+        const activeCollisionBG = device.createBindGroup({
+            layout: activeCollisionPipeline.getBindGroupLayout(0), entries: [
+                { binding: 0, resource: { buffer: tickBuf } },
+                { binding: 1, resource: { buffer: fbuf } },
+                { binding: 2, resource: { buffer: flagsBuf } },
+                { binding: 3, resource: { buffer: activeListBuf } },
+            ]
+        });
+
+        // Measure: scan + active-only collision per tick
+        const runTimes = [];
+        for (let r = 0; r < RUNS + 1; r++) {
+            device.queue.writeBuffer(fbuf, 0, initData);
+            device.queue.writeBuffer(flagsBuf, 0, flagData);
+
+            // Warmup
+            for (let i = 0; i < 5; i++) {
+                device.queue.writeBuffer(activeCountBuf, 0, new Uint32Array([0]));
+                device.queue.writeBuffer(tickBuf, 0, new Uint32Array([i % 2]));
+                const enc = device.createCommandEncoder();
+                let p = enc.beginComputePass(); p.setPipeline(scanPipeline); p.setBindGroup(0, scanBG); p.dispatchWorkgroups(wg); p.end();
+                p = enc.beginComputePass(); p.setPipeline(activeCollisionPipeline); p.setBindGroup(0, activeCollisionBG); p.dispatchWorkgroups(activeWg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+
+            const t0 = performance.now();
+            for (let i = 0; i < ITERS; i++) {
+                device.queue.writeBuffer(activeCountBuf, 0, new Uint32Array([0]));
+                device.queue.writeBuffer(tickBuf, 0, new Uint32Array([(5+i) % 2]));
+                const enc = device.createCommandEncoder();
+                let p = enc.beginComputePass(); p.setPipeline(scanPipeline); p.setBindGroup(0, scanBG); p.dispatchWorkgroups(wg); p.end();
+                p = enc.beginComputePass(); p.setPipeline(activeCollisionPipeline); p.setBindGroup(0, activeCollisionBG); p.dispatchWorkgroups(activeWg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            const ms = (performance.now() - t0) / ITERS;
+            if (r > 0) runTimes.push(ms);
+        }
+        const compactMs = median(runTimes);
+        const savings = ((1 - compactMs / baselineMs) * 100).toFixed(0);
+
+        print(`  ${label.padStart(4)} active (${actualPct.padStart(5)}% actual, ${gpuActiveCount.toLocaleString().padStart(10)} cells): ${compactMs.toFixed(3)}ms  [${runTimes.map(t=>t.toFixed(3)).join(', ')}]  savings: ${savings}%`,
+              frac <= 0.2 ? 'pass' : (frac <= 0.6 ? 'warn' : 'dim'));
+
+        results.push({ frac, actualPct: +actualPct, activeCount: gpuActiveCount, compactMs: +compactMs.toFixed(3), savings: +savings });
+        console.log("RESULT:" + JSON.stringify({ frac, actualPct: +actualPct, activeCount: gpuActiveCount, compactMs: +compactMs.toFixed(3), savings: +savings, runs: runTimes.map(t=>+t.toFixed(3)) }));
+
+        fbuf.destroy(); tickBuf.destroy(); flagsBuf.destroy();
+        activeListBuf.destroy(); activeCountBuf.destroy();
+    }
+
+    // ============================================================
+    // EARLY EXIT: same shader, same dispatch, just bail after momentum if inactive
+    // No flags, no scan, no active list. Zero infrastructure.
+    // ============================================================
+    print('');
+    print('=== EARLY EXIT: bail after momentum check, no infrastructure ===', 'gold');
+    print('Same dispatch as baseline. Skip feq+TRT+writeback if |jx|+|jy|+|jz| < threshold.', 'dim');
+    print('');
+
+    const earlyResults = [];
+
+    for (const frac of fractions) {
+        const label = `${(frac * 100).toFixed(0)}%`;
+        const activeRegion = makeActiveRegion(frac);
+        const initData = makeInitData(activeRegion);
+        const actualPct = (100 * activeRegion.size / N).toFixed(1);
+
+        const fbuf = device.createBuffer({ size: initData.byteLength, usage: STORAGE | COPY_DST });
+        const tickBuf = device.createBuffer({ size: 4, usage: UNIFORM | COPY_DST });
+
+        const bg = device.createBindGroup({ layout: earlyExitPipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: tickBuf } },
+            { binding: 1, resource: { buffer: fbuf } },
+        ]});
+
+        const runTimes = [];
+        for (let r = 0; r < RUNS + 1; r++) {
+            device.queue.writeBuffer(fbuf, 0, initData);
+            for (let i = 0; i < 5; i++) {
+                device.queue.writeBuffer(tickBuf, 0, new Uint32Array([i % 2]));
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(earlyExitPipeline); p.setBindGroup(0, bg); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+
+            const t0 = performance.now();
+            for (let i = 0; i < ITERS; i++) {
+                device.queue.writeBuffer(tickBuf, 0, new Uint32Array([(5+i) % 2]));
+                const enc = device.createCommandEncoder();
+                const p = enc.beginComputePass(); p.setPipeline(earlyExitPipeline); p.setBindGroup(0, bg); p.dispatchWorkgroups(wg); p.end();
+                device.queue.submit([enc.finish()]);
+            }
+            await device.queue.onSubmittedWorkDone();
+            const ms = (performance.now() - t0) / ITERS;
+            if (r > 0) runTimes.push(ms);
+        }
+        const earlyMs = median(runTimes);
+        const savings = ((1 - earlyMs / baselineMs) * 100).toFixed(0);
+
+        print(`  ${label.padStart(4)} active (${actualPct.padStart(5)}% actual): ${earlyMs.toFixed(3)}ms  [${runTimes.map(t=>t.toFixed(3)).join(', ')}]  savings: ${savings}%`,
+              +savings > 5 ? 'pass' : (+savings >= 0 ? 'warn' : 'dim'));
+
+        earlyResults.push({ frac, actualPct: +actualPct, earlyMs: +earlyMs.toFixed(3), savings: +savings });
+        console.log("RESULT:" + JSON.stringify({ test: 'early_exit', frac, actualPct: +actualPct, earlyMs: +earlyMs.toFixed(3), savings: +savings, runs: runTimes.map(t=>+t.toFixed(3)) }));
+
+        fbuf.destroy(); tickBuf.destroy();
+    }
+
+    // ============================================================
+    // Summary: compare all approaches
+    // ============================================================
+    print('');
+    print('=== COMPARISON ===', 'gold');
+    print(`Baseline: ${baselineMs.toFixed(3)}ms/tick (pure fused TRT, no skip logic)`, 'dim');
+    print('');
+    print(`${'Active%'.padStart(8)} ${'Compact'.padStart(10)} ${'EarlyExit'.padStart(10)} ${'Winner'.padStart(10)}`);
+    for (let i = 0; i < fractions.length; i++) {
+        const c = results[i + 1]; // skip baseline entry
+        const e = earlyResults[i];
+        const winner = (c && e) ? (Math.min(c.compactMs, e.earlyMs) < baselineMs ?
+            (c.compactMs < e.earlyMs ? 'compact' : 'early') : 'baseline') : '?';
+        const bestMs = winner === 'compact' ? c.compactMs : (winner === 'early' ? e.earlyMs : baselineMs);
+        const sav = ((1 - bestMs / baselineMs) * 100).toFixed(0);
+        print(`${e.actualPct.toFixed(1).padStart(7)}% ${(c ? c.compactMs.toFixed(3)+'ms' : '?').padStart(10)} ${(e.earlyMs.toFixed(3)+'ms').padStart(10)} ${(winner+' '+sav+'%').padStart(10)}`,
+              winner !== 'baseline' ? 'pass' : 'dim');
+    }
+
+    print('');
+    print('Done.');
+}
+
+run().catch(e => {
+    print('FATAL: ' + e.message, 'fail');
+    console.error(e);
+    console.log("RESULT:" + JSON.stringify({error: e.message}));
+});
+</script>
+</body></html>
