@@ -3,3 +3,5 @@ NEXT-STEPS.md
 node_modules/
 citations/
 computing.png
+.DS_Store
+results_*.jsonl
